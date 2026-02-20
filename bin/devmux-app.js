@@ -13,7 +13,7 @@ const binaryDir = resolve(bundlePath, "Contents/MacOS");
 const binaryPath = resolve(binaryDir, "DevmuxApp");
 
 const REPO = "arach/devmux";
-const ASSET_NAME = "DevmuxApp-macos-universal";
+const ASSET_NAME = "DevmuxApp-macos-arm64";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -44,6 +44,28 @@ function launch() {
   console.log("devmux app launched.");
 }
 
+// ── Build from source (current arch only) ────────────────────────────
+
+function buildFromSource() {
+  console.log("Building devmux app from source...");
+  try {
+    execSync("swift build -c release", {
+      cwd: appDir,
+      stdio: "inherit",
+    });
+  } catch {
+    return false;
+  }
+
+  const builtPath = resolve(appDir, ".build/release/DevmuxApp");
+  if (!existsSync(builtPath)) return false;
+
+  mkdirSync(binaryDir, { recursive: true });
+  execSync(`cp '${builtPath}' '${binaryPath}'`);
+  console.log("Build complete.");
+  return true;
+}
+
 // ── Download from GitHub releases ────────────────────────────────────
 
 function httpsGet(url) {
@@ -63,10 +85,9 @@ function httpsGet(url) {
 }
 
 async function download() {
-  console.log("Downloading devmux app...");
+  console.log("Downloading pre-built binary...");
 
   try {
-    // Get latest release asset URL
     const apiUrl = `https://api.github.com/repos/${REPO}/releases/latest`;
     const apiRes = await httpsGet(apiUrl);
     const chunks = [];
@@ -76,7 +97,6 @@ async function download() {
     const asset = release.assets?.find((a) => a.name === ASSET_NAME);
     if (!asset) throw new Error("Binary not found in release assets");
 
-    // Download the binary
     const dlRes = await httpsGet(asset.browser_download_url);
 
     mkdirSync(binaryDir, { recursive: true });
@@ -96,63 +116,38 @@ async function download() {
   }
 }
 
-// ── Build from source ────────────────────────────────────────────────
-
-function buildFromSource() {
-  if (!hasSwift()) {
-    console.error(
-      "Cannot download pre-built binary and Swift is not installed.\n" +
-      "Either:\n" +
-      "  1. Wait for a release with pre-built binaries\n" +
-      "  2. Install Xcode CLI tools: xcode-select --install"
-    );
-    process.exit(1);
-  }
-
-  console.log("Building devmux app from source...");
-  try {
-    execSync("swift build -c release --arch arm64 --arch x86_64", {
-      cwd: appDir,
-      stdio: "inherit",
-    });
-  } catch {
-    // Fallback: build for current arch only
-    try {
-      execSync("swift build -c release", {
-        cwd: appDir,
-        stdio: "inherit",
-      });
-    } catch {
-      console.error("Build failed.");
-      process.exit(1);
-    }
-  }
-
-  // Find the built binary
-  const universalPath = resolve(appDir, ".build/apple/Products/Release/DevmuxApp");
-  const debugPath = resolve(appDir, ".build/release/DevmuxApp");
-  const builtPath = existsSync(universalPath) ? universalPath : debugPath;
-
-  mkdirSync(binaryDir, { recursive: true });
-  execSync(`cp '${builtPath}' '${binaryPath}'`);
-  console.log("Build complete.");
-}
-
 // ── Commands ─────────────────────────────────────────────────────────
 
 async function ensureBinary() {
   if (existsSync(binaryPath)) return;
 
-  // Try download first, fall back to source build
-  const downloaded = await download();
-  if (!downloaded) {
-    buildFromSource();
+  // 1. Try local compile (fast, matches exact system)
+  if (hasSwift()) {
+    if (buildFromSource()) return;
+    console.log("Local build failed, trying download...");
   }
+
+  // 2. Fall back to pre-built binary from GitHub releases
+  const downloaded = await download();
+  if (downloaded) return;
+
+  // 3. Nothing worked
+  console.error(
+    "Could not build or download the devmux app.\n" +
+    "Options:\n" +
+    "  • Install Xcode CLI tools:  xcode-select --install\n" +
+    "  • Download manually from:   https://github.com/" + REPO + "/releases"
+  );
+  process.exit(1);
 }
 
 const cmd = process.argv[2];
 
 if (cmd === "build") {
+  if (!hasSwift()) {
+    console.error("Swift is required. Install with: xcode-select --install");
+    process.exit(1);
+  }
   buildFromSource();
 } else if (cmd === "quit") {
   try {

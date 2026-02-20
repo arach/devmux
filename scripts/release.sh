@@ -1,14 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build universal binary and prep for GitHub release
 cd "$(dirname "$0")/../app"
 
-echo "Building universal binary..."
-swift build -c release --arch arm64 --arch x86_64
+echo "Building release binary (arm64)..."
+swift build -c release
 
-BINARY=".build/apple/Products/Release/DevmuxApp"
-DEST="../dist/DevmuxApp-macos-universal"
+BINARY=".build/release/DevmuxApp"
+DEST="../dist/DevmuxApp-macos-arm64"
 
 mkdir -p ../dist
 cp "$BINARY" "$DEST"
@@ -18,6 +17,8 @@ echo ""
 echo "Binary: $DEST"
 ls -lh "$DEST"
 file "$DEST"
+
+VERSION=$(node -p "require('../package.json').version")
 echo ""
-echo "To create a release:"
-echo "  gh release create v\$(node -p \"require('../package.json').version\") $DEST --title \"v\$(node -p \"require('../package.json').version\")\""
+echo "To release:"
+echo "  gh release create v${VERSION} ${DEST} --title \"v${VERSION}\""
