@@ -81,7 +81,7 @@ export default function App() {
               Config
             </a>
             <a href="#app" className="nav-link">
-              Menu Bar
+              App
             </a>
             <a
               href="https://github.com/arach/devmux"
@@ -90,7 +90,7 @@ export default function App() {
               className="nav-github"
             >
               <GitHubIcon />
-              <span>GitHub</span>
+              <span className="github-label">GitHub</span>
             </a>
           </div>
         </div>
@@ -104,13 +104,14 @@ export default function App() {
             v0.1.0 — now on npm
           </div>
           <h1>
-            Claude Code + dev server,
+            Your dev sessions,
             <br />
-            <span className="accent">side by side.</span>
+            <span className="accent">managed.</span>
           </h1>
           <p className="hero-sub">
-            One command to launch a tmux session with Claude Code and your dev
-            server. Auto-detects your stack, fully configurable.
+            A native tmux session manager for developers. One command to spin up
+            your workspace — configurable panes, auto-detection, and a macOS menu
+            bar app.
           </p>
 
           <div className="install fade-in fade-in-delay-1">
@@ -143,8 +144,8 @@ export default function App() {
             <span className="feature-icon">&#9654;</span>
             <h3>One command</h3>
             <p>
-              Run <code>devmux</code> in any project. It creates a tmux session
-              with Claude Code and your dev server ready to go.
+              Run <code>devmux</code> in any project. It creates a named tmux
+              session with your tools laid out and running.
             </p>
           </div>
           <div className="feature">
@@ -152,39 +153,38 @@ export default function App() {
             <h3>Auto-detect</h3>
             <p>
               Reads your <code>package.json</code> and lock files to pick the
-              right dev command and package manager automatically.
+              right dev command and package manager.
             </p>
           </div>
           <div className="feature">
             <span className="feature-icon">&#9635;</span>
             <h3>Configurable</h3>
             <p>
-              Drop a <code>.devmux.json</code> in your project root to customize
+              Drop a <code>.devmux.json</code> in your project root to define
               panes, commands, and layout.
             </p>
           </div>
           <div className="feature">
             <span className="feature-icon">&#8644;</span>
-            <h3>Attach / detach</h3>
+            <h3>Persistent sessions</h3>
             <p>
-              Sessions persist in the background. Come back to exactly where you
-              left off — processes keep running.
+              Sessions run in the background. Detach, reattach, pick up exactly
+              where you left off.
             </p>
           </div>
           <div className="feature">
             <span className="feature-icon">&#9000;</span>
-            <h3>Menu bar app</h3>
+            <h3>Native menu bar app</h3>
             <p>
-              Optional macOS companion app. See all projects, launch or attach
-              with a click, global hotkey.
+              macOS companion to manage all your sessions. Launch, attach,
+              detach — one click or a global hotkey.
             </p>
           </div>
           <div className="feature">
             <span className="feature-icon">&#9734;</span>
             <h3>Zero dependencies</h3>
             <p>
-              Pure Node.js CLI — no runtime deps. Just needs tmux installed.
-              Works with any Node 18+ setup.
+              Pure Node.js CLI with no runtime deps. Just tmux and Node 18+.
             </p>
           </div>
         </section>
@@ -208,10 +208,10 @@ export default function App() {
             <div className="step">
               <span className="step-num">2</span>
               <div className="step-text">
-                <h3>tmux session starts</h3>
+                <h3>Session starts</h3>
                 <p>
-                  A named tmux session is created with your panes configured —
-                  Claude Code on the left, dev server on the right.
+                  A named tmux session is created with your panes configured and
+                  commands running.
                 </p>
               </div>
             </div>
@@ -328,7 +328,7 @@ export default function App() {
         {/* CTA */}
         <section className="cta">
           <h2>Ready to devmux?</h2>
-          <p>Install in seconds. Works with any Node.js project.</p>
+          <p>Install globally and run in any project directory.</p>
           <div className="cta-actions">
             <a
               href="https://github.com/arach/devmux"
