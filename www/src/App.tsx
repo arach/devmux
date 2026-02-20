@@ -45,6 +45,7 @@ function CheckIcon() {
 }
 
 const configExample = `{
+  <span class="hl-key">"ensure"</span>: <span class="hl-num">true</span>,
   <span class="hl-key">"panes"</span>: [
     {
       <span class="hl-key">"name"</span>: <span class="hl-str">"claude"</span>,

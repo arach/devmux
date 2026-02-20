@@ -165,6 +165,46 @@ function createSession(dir) {
   return name;
 }
 
+/** Check each pane and prefill or restart commands that have exited.
+ *  mode: "prefill" types the command without pressing Enter
+ *  mode: "ensure" types the command and presses Enter */
+function restoreCommands(name, dir, mode) {
+  const config = readConfig(dir);
+  let panes;
+  if (config?.panes?.length) {
+    panes = resolvePane(config.panes, dir);
+  } else {
+    const devCmd = detectDevCommand(dir);
+    panes = [
+      { name: "claude", cmd: "claude", size: 60 },
+      { name: "server", cmd: devCmd || undefined },
+    ];
+  }
+
+  const paneIds = getPaneIds(name);
+  const shells = new Set(["bash", "zsh", "fish", "sh", "dash"]);
+
+  let count = 0;
+  for (let i = 0; i < panes.length && i < paneIds.length; i++) {
+    if (!panes[i].cmd) continue;
+    const cur = runQuiet(
+      `tmux display-message -t "${paneIds[i]}" -p "#{pane_current_command}"`
+    );
+    if (cur && shells.has(cur)) {
+      if (mode === "ensure") {
+        run(`tmux send-keys -t "${paneIds[i]}" '${esc(panes[i].cmd)}' Enter`);
+      } else {
+        run(`tmux send-keys -t "${paneIds[i]}" '${esc(panes[i].cmd)}'`);
+      }
+      count++;
+    }
+  }
+  if (count > 0) {
+    const verb = mode === "ensure" ? "Restarted" : "Prefilled";
+    console.log(`${verb} ${count} exited command${count > 1 ? "s" : ""}`);
+  }
+}
+
 // ── Commands ─────────────────────────────────────────────────────────
 
 function printUsage() {
@@ -184,6 +224,7 @@ Config (.devmux.json):
   Place in your project root to customize the layout:
 
   {
+    "ensure": true,
     "panes": [
       { "name": "claude", "cmd": "claude", "size": 60 },
       { "name": "server", "cmd": "pnpm dev" },
@@ -191,9 +232,11 @@ Config (.devmux.json):
     ]
   }
 
-  size    Width % for the first pane (default: 60)
-  cmd     Command to run in the pane
-  name    Label (for your reference)
+  size      Width % for the first pane (default: 60)
+  cmd       Command to run in the pane
+  name      Label (for your reference)
+  ensure    Auto-restart exited commands on reattach
+  prefill   Type commands into idle panes on reattach (you hit Enter)
 
 Layouts:
   2 panes  →  side-by-side split
@@ -218,6 +261,7 @@ function initConfig() {
 
   const devCmd = detectDevCommand(dir);
   const config = {
+    ensure: true,
     panes: [
       { name: "claude", cmd: "claude", size: 60 },
       { name: "server", cmd: devCmd || "echo 'no dev server detected'" },
@@ -257,6 +301,12 @@ function createOrAttach() {
 
   if (sessionExists(name)) {
     console.log(`Reattaching to "${name}"...`);
+    const config = readConfig(dir);
+    if (config?.ensure) {
+      restoreCommands(name, dir, "ensure");
+    } else if (config?.prefill) {
+      restoreCommands(name, dir, "prefill");
+    }
     attach(name);
     return;
   }

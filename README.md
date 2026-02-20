@@ -4,9 +4,9 @@
 
 # devmux
 
-Claude Code + dev server, side by side in tmux.
+Declarative tmux sessions for developers.
 
-One command to create a tmux session with your AI coding assistant and dev server running together. Auto-detects your stack, fully configurable with `.devmux.json`.
+One command to create a named tmux session with your tools running. Auto-detects your stack, fully configurable with `.devmux.json`, and a native macOS menu bar app.
 
 ## Install
 
@@ -37,6 +37,7 @@ Drop a `.devmux.json` in your project root:
 
 ```json
 {
+  "ensure": true,
   "panes": [
     { "name": "claude", "cmd": "claude", "size": 60 },
     { "name": "server", "cmd": "pnpm dev" },
@@ -45,11 +46,20 @@ Drop a `.devmux.json` in your project root:
 }
 ```
 
+### Pane options
+
 | Field  | Description                              |
 |--------|------------------------------------------|
 | `name` | Label for the pane (for your reference)  |
 | `cmd`  | Command to run in the pane               |
 | `size` | Width % for the first pane (default: 60) |
+
+### Session options
+
+| Field     | Description                                                                 |
+|-----------|-----------------------------------------------------------------------------|
+| `ensure`  | Auto-restart exited commands on reattach                                    |
+| `prefill` | Type exited commands into panes on reattach without running (you hit Enter) |
 
 ### Layouts
 
