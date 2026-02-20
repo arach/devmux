@@ -461,5 +461,5 @@ async function generate(html, filename) {
 
 console.log("Generating OG images...\n");
 await generate(buildHTML("npm install -g devmux"), "og.png");
-await generate(buildHTML("arach.github.io/devmux"), "og-site.png");
+await generate(buildHTML("devmux.arach.dev"), "og-site.png");
 console.log("\nDone!");
