@@ -1,0 +1,15 @@
+{
+  "name": "devmux",
+  "version": "0.1.0",
+  "description": "Tmux sessions with Claude Code + dev server, side by side",
+  "bin": {
+    "devmux": "./bin/devmux.js"
+  },
+  "keywords": ["tmux", "claude", "dev-server", "developer-tools", "cli"],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": ["bin"]
+}
