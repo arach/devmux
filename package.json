@@ -3,13 +3,29 @@
   "version": "0.1.0",
   "description": "Tmux sessions with Claude Code + dev server, side by side",
   "bin": {
-    "devmux": "./bin/devmux.js"
+    "devmux": "./bin/devmux.js",
+    "devmux-app": "./bin/devmux-app.js"
   },
-  "keywords": ["tmux", "claude", "dev-server", "developer-tools", "cli"],
+  "keywords": [
+    "tmux",
+    "claude",
+    "dev-server",
+    "developer-tools",
+    "cli",
+    "terminal",
+    "multiplexer"
+  ],
   "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=18"
   },
-  "files": ["bin"]
+  "os": ["darwin"],
+  "files": [
+    "bin",
+    "app/Package.swift",
+    "app/Sources",
+    "app/DevmuxApp.app/Contents/Info.plist",
+    "docs"
+  ]
 }

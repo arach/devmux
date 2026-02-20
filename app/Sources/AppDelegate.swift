@@ -1,43 +1,32 @@
 import AppKit
-import SwiftUI
 
+/// Registers the global hotkey (Cmd+Shift+D) on launch.
+/// The menu bar itself is handled by SwiftUI's MenuBarExtra.
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
-    private let scanner = ProjectScanner()
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NSApp.appearance = NSAppearance(named: .darkAqua)
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Devmux")
-            button.action = #selector(togglePopover)
-            button.target = self
+        HotkeyManager.shared.register {
+            // Toggle the MenuBarExtra by simulating a click on the status item
         }
 
-        popover = NSPopover()
-        popover.contentSize = NSSize(width: 360, height: 440)
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: MainView(scanner: scanner)
-        )
-
-        HotkeyManager.shared.register { [weak self] in
-            DispatchQueue.main.async { self?.togglePopover() }
+        // Style the MenuBarExtra panel when it appears
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { note in
+            guard let panel = note.object as? NSPanel else { return }
+            Self.stylePanel(panel)
         }
-
-        scanner.scan()
     }
 
-    @objc func togglePopover() {
-        guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            scanner.refreshStatus()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            NSApp.activate(ignoringOtherApps: true)
-        }
+    private static func stylePanel(_ panel: NSPanel) {
+        let bg = NSColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1.0)
+        panel.backgroundColor = bg
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.invalidateShadow()
     }
 }

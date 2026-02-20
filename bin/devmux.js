@@ -90,12 +90,19 @@ function detectDevCommand(dir) {
 // ── Session creation ─────────────────────────────────────────────────
 
 function resolvePane(panes, dir) {
-  // Resolve any "auto" or missing commands
   return panes.map((p) => ({
     name: p.name || "",
     cmd: p.cmd || undefined,
     size: p.size || undefined,
   }));
+}
+
+/** Get ordered pane IDs (e.g. ["%0", "%1"]) for a session */
+function getPaneIds(name) {
+  const out = runQuiet(
+    `tmux list-panes -t "${name}" -F "#{pane_id}"`
+  );
+  return out ? out.split("\n").filter(Boolean) : [];
 }
 
 function createSession(dir) {
@@ -108,7 +115,6 @@ function createSession(dir) {
     panes = resolvePane(config.panes, dir);
     console.log(`Using .devmux.json (${panes.length} panes)`);
   } else {
-    // Default: claude + dev server
     const devCmd = detectDevCommand(dir);
     panes = [
       { name: "claude", cmd: "claude", size: 60 },
@@ -117,58 +123,44 @@ function createSession(dir) {
     if (devCmd) console.log(`Detected: ${devCmd}`);
   }
 
-  // Create session with first pane
-  run(`tmux new-session -d -s "${name}" -c '${d}' -x 200 -y 50`);
+  // Create session (targets are config-agnostic — no hardcoded indices)
+  run(`tmux new-session -d -s "${name}" -c '${d}'`);
 
-  if (panes.length === 1) {
-    // Single pane
-    if (panes[0].cmd) {
-      run(`tmux send-keys -t "${name}":0.0 '${esc(panes[0].cmd)}' Enter`);
-    }
-  } else if (panes.length === 2) {
-    // Two panes: simple horizontal split
+  if (panes.length === 2) {
     const mainSize = panes[0].size || 60;
     run(
-      `tmux split-window -h -t "${name}":0.0 -c '${d}' -p ${100 - mainSize}`
+      `tmux split-window -h -t "${name}" -c '${d}' -p ${100 - mainSize}`
     );
-    if (panes[0].cmd)
-      run(
-        `tmux send-keys -t "${name}":0.0 '${esc(panes[0].cmd)}' Enter`
-      );
-    if (panes[1].cmd)
-      run(
-        `tmux send-keys -t "${name}":0.1 '${esc(panes[1].cmd)}' Enter`
-      );
-  } else {
-    // 3+ panes: main-vertical layout (first pane left, rest stacked right)
+  } else if (panes.length >= 3) {
     const mainSize = panes[0].size || 60;
-
-    // Create additional panes by splitting
     for (let i = 1; i < panes.length; i++) {
-      run(`tmux split-window -t "${name}":0 -c '${d}'`);
+      run(`tmux split-window -t "${name}" -c '${d}'`);
     }
-
-    // Apply main-vertical layout
     runQuiet(
       `tmux set-option -t "${name}" -w main-pane-width '${mainSize}%'`
     );
-    run(`tmux select-layout -t "${name}":0 main-vertical`);
+    run(`tmux select-layout -t "${name}" main-vertical`);
+  }
 
-    // Send commands to each pane
-    for (let i = 0; i < panes.length; i++) {
-      if (panes[i].cmd) {
-        run(
-          `tmux send-keys -t "${name}":0.${i} '${esc(panes[i].cmd)}' Enter`
-        );
-      }
+  // Get actual pane IDs (works regardless of base-index / pane-base-index)
+  const paneIds = getPaneIds(name);
+
+  // Send commands to each pane by ID
+  for (let i = 0; i < panes.length && i < paneIds.length; i++) {
+    if (panes[i].cmd) {
+      run(`tmux send-keys -t "${paneIds[i]}" '${esc(panes[i].cmd)}' Enter`);
     }
   }
 
-  // Name the window
-  run(`tmux rename-window -t "${name}":0 "dev"`);
+  // Tag the terminal window title so the menu bar app can find it
+  runQuiet(`tmux set-option -t "${name}" set-titles on`);
+  runQuiet(`tmux set-option -t "${name}" set-titles-string "[devmux:${name}] #{pane_current_command}"`);
 
-  // Focus the main (first) pane
-  run(`tmux select-pane -t "${name}":0.0`);
+  // Name the window and focus the first pane
+  runQuiet(`tmux rename-window -t "${name}" "dev"`);
+  if (paneIds.length) {
+    run(`tmux select-pane -t "${paneIds[0]}"`);
+  }
 
   return name;
 }
@@ -183,6 +175,9 @@ Usage:
   devmux init         Generate .devmux.json config for this project
   devmux ls           List active tmux sessions
   devmux kill [name]  Kill a session (defaults to current project)
+  devmux app          Launch the menu bar companion app
+  devmux app build    Rebuild the menu bar app
+  devmux app quit     Stop the menu bar app
   devmux help         Show this help
 
 Config (.devmux.json):
@@ -298,6 +293,18 @@ switch (command) {
   case "rm":
     killSession(args[1]);
     break;
+  case "app": {
+    // Forward to devmux-app script
+    const { execFileSync } = await import("node:child_process");
+    const { dirname, resolve } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const appScript = resolve(__dirname, "devmux-app.js");
+    try {
+      execFileSync("node", [appScript, ...args.slice(1)], { stdio: "inherit" });
+    } catch { /* exit code forwarded */ }
+    break;
+  }
   case "-h":
   case "--help":
   case "help":
