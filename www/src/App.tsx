@@ -19,6 +19,14 @@ function GitHubIcon() {
   );
 }
 
+function StarIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14">
+      <path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z" />
+    </svg>
+  );
+}
+
 function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -74,9 +82,6 @@ export default function App() {
             <span className="nav-name">devmux</span>
           </a>
           <div className="nav-links">
-            <a href="#features" className="nav-link">
-              Features
-            </a>
             <a href="#config" className="nav-link">
               Config
             </a>
@@ -101,17 +106,16 @@ export default function App() {
         <section className="hero fade-in">
           <div className="hero-badge">
             <span className="hero-badge-dot" />
-            v0.1.0 — now on npm
+            Open source · 100% free
           </div>
           <h1>
-            Your dev sessions,
+            Declarative
             <br />
-            <span className="accent">managed.</span>
+            <span className="accent">tmux sessions</span>
           </h1>
           <p className="hero-sub">
-            A native tmux session manager for developers. One command to spin up
-            your workspace — configurable panes, auto-detection, and a macOS menu
-            bar app.
+            Define your panes in JSON, run one command.
+            Native macOS menu bar app included.
           </p>
 
           <div className="install fade-in fade-in-delay-1">
@@ -135,6 +139,62 @@ export default function App() {
                 {copied ? <CheckIcon /> : <CopyIcon />}
               </button>
             </div>
+            <a
+              href="https://github.com/arach/devmux"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="star-link"
+            >
+              <StarIcon />
+              Star us on GitHub
+            </a>
+          </div>
+        </section>
+
+        {/* Config */}
+        <section className="section" id="config">
+          <div className="config-grid fade-in fade-in-delay-2">
+            <div>
+              <h2 className="config-title">
+                One file. Any layout.
+              </h2>
+              <p className="config-desc">
+                Drop a <code>.devmux.json</code> in your project root.
+                Define panes, commands, and sizes.
+              </p>
+              <div className="layouts">
+                <div className="layout-card">
+                  <h3>2 panes</h3>
+                  <p>Side-by-side</p>
+                  <div className="layout-diagram layout-2">
+                    <div className="layout-pane main">claude</div>
+                    <div className="layout-pane">server</div>
+                  </div>
+                </div>
+                <div className="layout-card">
+                  <h3>3+ panes</h3>
+                  <p>Main-vertical</p>
+                  <div className="layout-diagram layout-3">
+                    <div className="layout-pane main">claude</div>
+                    <div className="layout-pane">server</div>
+                    <div className="layout-pane">tests</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="code-block">
+              <div className="code-header">
+                <span className="code-dot code-dot-red" />
+                <span className="code-dot code-dot-yellow" />
+                <span className="code-dot code-dot-green" />
+                <span className="code-filename">.devmux.json</span>
+              </div>
+              <pre
+                className="code-pre"
+                dangerouslySetInnerHTML={{ __html: configExample }}
+              />
+            </div>
           </div>
         </section>
 
@@ -144,183 +204,59 @@ export default function App() {
             <span className="feature-icon">&#9654;</span>
             <h3>One command</h3>
             <p>
-              Run <code>devmux</code> in any project. It creates a named tmux
-              session with your tools laid out and running.
+              Run <code>devmux</code> in any project directory to create a named
+              tmux session with your panes running.
             </p>
           </div>
           <div className="feature">
             <span className="feature-icon">&#9881;</span>
             <h3>Auto-detect</h3>
             <p>
-              Reads your <code>package.json</code> and lock files to pick the
-              right dev command and package manager.
-            </p>
-          </div>
-          <div className="feature">
-            <span className="feature-icon">&#9635;</span>
-            <h3>Configurable</h3>
-            <p>
-              Drop a <code>.devmux.json</code> in your project root to define
-              panes, commands, and layout.
+              Reads <code>package.json</code> and lock files to pick
+              the right dev command automatically.
             </p>
           </div>
           <div className="feature">
             <span className="feature-icon">&#8644;</span>
-            <h3>Persistent sessions</h3>
+            <h3>Persistent</h3>
             <p>
-              Sessions run in the background. Detach, reattach, pick up exactly
+              Sessions run in the background. Detach, reattach, pick up
               where you left off.
             </p>
           </div>
           <div className="feature">
-            <span className="feature-icon">&#9000;</span>
-            <h3>Native menu bar app</h3>
-            <p>
-              macOS companion to manage all your sessions. Launch, attach,
-              detach — one click or a global hotkey.
-            </p>
-          </div>
-          <div className="feature">
             <span className="feature-icon">&#9734;</span>
-            <h3>Zero dependencies</h3>
+            <h3>Zero deps</h3>
             <p>
-              Pure Node.js CLI with no runtime deps. Just tmux and Node 18+.
+              Pure Node.js CLI. Just tmux and Node 18+.
             </p>
-          </div>
-        </section>
-
-        {/* How it works */}
-        <section className="section">
-          <div className="section-header">
-            <h2>How it works</h2>
-          </div>
-          <div className="steps">
-            <div className="step">
-              <span className="step-num">1</span>
-              <div className="step-text">
-                <h3>Run devmux</h3>
-                <p>
-                  In your project directory, run <code>devmux</code>. It scans
-                  for config or auto-detects your dev command.
-                </p>
-              </div>
-            </div>
-            <div className="step">
-              <span className="step-num">2</span>
-              <div className="step-text">
-                <h3>Session starts</h3>
-                <p>
-                  A named tmux session is created with your panes configured and
-                  commands running.
-                </p>
-              </div>
-            </div>
-            <div className="step">
-              <span className="step-num">3</span>
-              <div className="step-text">
-                <h3>Code away</h3>
-                <p>
-                  Detach anytime with <code>Ctrl+b d</code>. Reattach by running{" "}
-                  <code>devmux</code> again. Sessions persist until you kill
-                  them.
-                </p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Config */}
-        <section className="section" id="config">
-          <div className="section-header">
-            <h2>Configure your workspace</h2>
-            <p>
-              Drop a <code>.devmux.json</code> in your project root. Define any
-              number of panes with custom commands.
-            </p>
-          </div>
-
-          <div className="code-block">
-            <div className="code-header">
-              <span className="code-dot code-dot-red" />
-              <span className="code-dot code-dot-yellow" />
-              <span className="code-dot code-dot-green" />
-              <span className="code-filename">.devmux.json</span>
-            </div>
-            <pre
-              className="code-pre"
-              dangerouslySetInnerHTML={{ __html: configExample }}
-            />
-          </div>
-
-          <div className="layouts">
-            <div className="layout-card">
-              <h3>2 panes</h3>
-              <p>Side-by-side split</p>
-              <div className="layout-diagram layout-2">
-                <div className="layout-pane main">claude</div>
-                <div className="layout-pane">server</div>
-              </div>
-            </div>
-            <div className="layout-card">
-              <h3>3+ panes</h3>
-              <p>Main-vertical layout</p>
-              <div className="layout-diagram layout-3">
-                <div className="layout-pane main">claude</div>
-                <div className="layout-pane">server</div>
-                <div className="layout-pane">tests</div>
-              </div>
-            </div>
           </div>
         </section>
 
         {/* Menu bar app */}
         <section className="app-section" id="app">
-          <div className="section-header">
-            <h2>Menu bar companion</h2>
-            <p>
-              A lightweight macOS menu bar app for managing your devmux sessions
-              without touching the terminal.
-            </p>
-          </div>
           <div className="app-grid">
             <div>
+              <h2 className="app-title">Native macOS menu bar app</h2>
+              <p className="app-desc">
+                Built with SwiftUI. Manage all your tmux sessions
+                without touching the terminal.
+              </p>
               <ul className="app-features">
-                <li>See all projects and their session status</li>
+                <li>See all projects and session status</li>
                 <li>Launch, attach, or detach with a click</li>
                 <li>
-                  Global hotkey (<code>Cmd+Shift+D</code>)
+                  Global hotkey <code>Cmd+Shift+D</code>
                 </li>
                 <li>Auto-scans your project directories</li>
-                <li>Reads .devmux.json for pane info</li>
-                <li>Built with SwiftUI, runs natively on macOS</li>
               </ul>
             </div>
-            <div className="app-preview">
-              <div className="app-preview-bar">
-                <span className="app-preview-icon">$</span>
-                <span className="app-preview-title">devmux</span>
-              </div>
-              <div className="app-preview-row">
-                <span className="app-preview-name">
-                  <span className="app-preview-dot running" />
-                  my-app
-                </span>
-                <span className="app-preview-btn attach">Attach</span>
-              </div>
-              <div className="app-preview-row">
-                <span className="app-preview-name">
-                  <span className="app-preview-dot running" />
-                  api-server
-                </span>
-                <span className="app-preview-btn attach">Attach</span>
-              </div>
-              <div className="app-preview-row">
-                <span className="app-preview-name">
-                  <span className="app-preview-dot idle" />
-                  docs-site
-                </span>
-                <span className="app-preview-btn launch">Launch</span>
-              </div>
+            <div className="app-screenshot-wrap">
+              <img
+                src="/app-screenshot.png"
+                alt="devmux menu bar app showing a running session"
+                className="app-screenshot"
+              />
             </div>
           </div>
         </section>
