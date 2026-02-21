@@ -3,7 +3,7 @@ name: Deploy site to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: [site/**]
+    paths: [site/**, docs-site/**, docs/**]
   workflow_dispatch:
 
 permissions:
@@ -21,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Landing page (site/)
       - uses: oven-sh/setup-bun@v2
 
       - run: bun install --frozen-lockfile
@@ -28,6 +29,19 @@ jobs:
 
       - run: bun run build
         working-directory: site
+
+      # Docs site (docs-site/) → site/dist/docs/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+        working-directory: docs-site
+
+      - run: npx astro build
+        working-directory: docs-site
+
+      - run: mkdir -p site/dist/docs && cp -r docs-site/dist/* site/dist/docs/
 
       - uses: actions/configure-pages@v5
 
