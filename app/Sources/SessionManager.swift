@@ -35,4 +35,28 @@ enum SessionManager {
         try? task.run()
         task.waitUntilExit()
     }
+
+    /// Reconcile session state to match declared config (recreate missing panes)
+    static func sync(project: Project) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: devmuxPath)
+        task.arguments = ["sync"]
+        task.currentDirectoryURL = URL(fileURLWithPath: project.path)
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+    }
+
+    /// Restart a specific pane's process (kill + re-run declared command)
+    static func restart(project: Project, paneName: String? = nil) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: devmuxPath)
+        task.arguments = paneName != nil ? ["restart", paneName!] : ["restart"]
+        task.currentDirectoryURL = URL(fileURLWithPath: project.path)
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+    }
 }

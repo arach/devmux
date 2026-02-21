@@ -215,20 +215,194 @@ function restoreCommands(name, dir, mode) {
   }
 }
 
+// ── Sync / reconcile ────────────────────────────────────────────────
+
+function resolvePanes(dir) {
+  const config = readConfig(dir);
+  if (config?.panes?.length) {
+    return resolvePane(config.panes, dir);
+  }
+  const devCmd = detectDevCommand(dir);
+  return [
+    { name: "claude", cmd: "claude", size: 60 },
+    { name: "server", cmd: devCmd || undefined },
+  ];
+}
+
+function syncSession() {
+  const dir = process.cwd();
+  const name = toSessionName(dir);
+
+  if (!sessionExists(name)) {
+    console.log(`No session "${name}" — creating from scratch.`);
+    createSession(dir);
+    console.log("Session created.");
+    return;
+  }
+
+  const panes = resolvePanes(dir);
+  const actualIds = getPaneIds(name);
+  const declared = panes.length;
+  const actual = actualIds.length;
+  const d = esc(dir);
+  const shells = new Set(["bash", "zsh", "fish", "sh", "dash"]);
+
+  console.log(`Session "${name}": ${actual} pane(s) found, ${declared} declared.`);
+
+  // Phase 1: recreate missing panes
+  if (actual < declared) {
+    const missing = declared - actual;
+    console.log(`Recreating ${missing} missing pane(s)...`);
+    for (let i = 0; i < missing; i++) {
+      run(`tmux split-window -t "${name}" -c '${d}'`);
+    }
+
+    // Re-apply layout
+    if (declared === 2) {
+      const mainSize = panes[0].size || 60;
+      // With 2 panes, use horizontal split layout
+      run(`tmux select-layout -t "${name}" even-horizontal`);
+      runQuiet(
+        `tmux set-option -t "${name}" -w main-pane-width '${mainSize}%'`
+      );
+      run(`tmux select-layout -t "${name}" main-vertical`);
+    } else if (declared >= 3) {
+      const mainSize = panes[0].size || 60;
+      runQuiet(
+        `tmux set-option -t "${name}" -w main-pane-width '${mainSize}%'`
+      );
+      run(`tmux select-layout -t "${name}" main-vertical`);
+    }
+  }
+
+  // Phase 2: restore commands and labels on all panes
+  const freshIds = getPaneIds(name);
+  let restored = 0;
+  for (let i = 0; i < panes.length && i < freshIds.length; i++) {
+    // Set pane title/label
+    if (panes[i].name) {
+      runQuiet(`tmux select-pane -t "${freshIds[i]}" -T "${panes[i].name}"`);
+    }
+    // If pane is idle at a shell prompt, send its declared command
+    if (panes[i].cmd) {
+      const cur = runQuiet(
+        `tmux display-message -t "${freshIds[i]}" -p "#{pane_current_command}"`
+      );
+      if (cur && shells.has(cur)) {
+        run(`tmux send-keys -t "${freshIds[i]}" '${esc(panes[i].cmd)}' Enter`);
+        restored++;
+      }
+    }
+  }
+
+  // Focus first pane
+  if (freshIds.length) {
+    run(`tmux select-pane -t "${freshIds[0]}"`);
+  }
+
+  if (restored > 0) {
+    console.log(`Restarted ${restored} command(s).`);
+  }
+  console.log("Sync complete.");
+}
+
+// ── Restart pane ────────────────────────────────────────────────────
+
+function restartPane(target) {
+  const dir = process.cwd();
+  const name = toSessionName(dir);
+
+  if (!sessionExists(name)) {
+    console.log(`No session "${name}".`);
+    return;
+  }
+
+  const panes = resolvePanes(dir);
+  const paneIds = getPaneIds(name);
+
+  // Resolve target to an index
+  let idx;
+  if (target === undefined || target === null || target === "") {
+    // Default: first pane (claude)
+    idx = 0;
+  } else if (/^\d+$/.test(target)) {
+    idx = parseInt(target, 10);
+  } else {
+    // Match by name (case-insensitive)
+    idx = panes.findIndex(
+      (p) => p.name && p.name.toLowerCase() === target.toLowerCase()
+    );
+    if (idx === -1) {
+      console.log(
+        `No pane named "${target}". Available: ${panes.map((p, i) => p.name || `[${i}]`).join(", ")}`
+      );
+      return;
+    }
+  }
+
+  if (idx < 0 || idx >= paneIds.length) {
+    console.log(`Pane index ${idx} is out of range (${paneIds.length} panes).`);
+    return;
+  }
+
+  const paneId = paneIds[idx];
+  const pane = panes[idx] || {};
+  const label = pane.name || `pane ${idx}`;
+
+  // Get the PID of the process running in the pane
+  const panePid = runQuiet(
+    `tmux display-message -t "${paneId}" -p "#{pane_pid}"`
+  );
+
+  // Step 1: try C-c to gracefully stop
+  console.log(`Stopping ${label}...`);
+  run(`tmux send-keys -t "${paneId}" C-c`);
+
+  // Brief pause to let C-c propagate
+  execSync("sleep 0.5");
+
+  // Step 2: check if the process is still running (not back to shell)
+  const shells = new Set(["bash", "zsh", "fish", "sh", "dash"]);
+  const cur = runQuiet(
+    `tmux display-message -t "${paneId}" -p "#{pane_current_command}"`
+  );
+
+  if (cur && !shells.has(cur)) {
+    // Still hung — escalate: kill the child processes of the pane
+    console.log(`Process still running (${cur}), sending SIGKILL...`);
+    if (panePid) {
+      // Kill all children of the pane's shell process
+      runQuiet(`pkill -KILL -P ${panePid}`);
+      execSync("sleep 0.3");
+    }
+  }
+
+  // Step 3: send the declared command
+  if (pane.cmd) {
+    console.log(`Starting: ${pane.cmd}`);
+    run(`tmux send-keys -t "${paneId}" '${esc(pane.cmd)}' Enter`);
+  } else {
+    console.log(`No command declared for ${label} — pane is at shell prompt.`);
+  }
+}
+
 // ── Commands ─────────────────────────────────────────────────────────
 
 function printUsage() {
   console.log(`devmux — Claude Code + dev server in tmux
 
 Usage:
-  devmux              Create session (or reattach) for current project
-  devmux init         Generate .devmux.json config for this project
-  devmux ls           List active tmux sessions
-  devmux kill [name]  Kill a session (defaults to current project)
-  devmux app          Launch the menu bar companion app
-  devmux app build    Rebuild the menu bar app
-  devmux app quit     Stop the menu bar app
-  devmux help         Show this help
+  devmux                    Create session (or reattach) for current project
+  devmux init               Generate .devmux.json config for this project
+  devmux ls                 List active tmux sessions
+  devmux kill [name]        Kill a session (defaults to current project)
+  devmux sync               Reconcile session to match declared config
+  devmux restart [pane]     Restart a pane's process (by name or index)
+  devmux app                Launch the menu bar companion app
+  devmux app build          Rebuild the menu bar app
+  devmux app restart        Rebuild and relaunch the menu bar app
+  devmux app quit           Stop the menu bar app
+  devmux help               Show this help
 
 Config (.devmux.json):
   Place in your project root to customize the layout:
@@ -247,6 +421,17 @@ Config (.devmux.json):
   name      Label (for your reference)
   ensure    Auto-restart exited commands on reattach
   prefill   Type commands into idle panes on reattach (you hit Enter)
+
+Recovery:
+  devmux sync       Recreates missing panes, restores commands, fixes layout.
+                    Use when a pane was killed and you want to get back to the
+                    declared state without killing the whole session.
+
+  devmux restart    Kills the process in a pane and re-runs its declared command.
+                    Accepts a pane name or 0-based index (default: 0 / first pane).
+                    Examples:  devmux restart         (restarts "claude")
+                               devmux restart server  (restarts "server" by name)
+                               devmux restart 1       (restarts pane at index 1)
 
 Layouts:
   2 panes  →  side-by-side split
@@ -413,6 +598,14 @@ switch (command) {
   case "kill":
   case "rm":
     killSession(args[1]);
+    break;
+  case "sync":
+  case "reconcile":
+    syncSession();
+    break;
+  case "restart":
+  case "respawn":
+    restartPane(args[1]);
     break;
   case "tile":
   case "t":

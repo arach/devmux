@@ -107,6 +107,13 @@ struct MainView: View {
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                                     scanner.refreshStatus()
                                 }
+                            } onSync: {
+                                SessionManager.sync(project: project)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                    scanner.refreshStatus()
+                                }
+                            } onRestart: { paneName in
+                                SessionManager.restart(project: project, paneName: paneName)
                             }
                         }
                     }
@@ -155,6 +162,17 @@ struct MainView: View {
             statusLine
 
             Spacer()
+
+            // Palette hint
+            Text("\u{2318}\u{21E7}M")
+                .font(Typo.mono(9))
+                .foregroundColor(Palette.textMuted)
+                .help("Command palette (Cmd+Shift+M)")
+
+            Rectangle()
+                .fill(Palette.border)
+                .frame(width: 0.5, height: 12)
+                .padding(.horizontal, 6)
 
             // Quit
             Button { NSApp.terminate(nil) } label: {

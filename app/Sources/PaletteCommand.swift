@@ -69,13 +69,14 @@ struct PaletteCommand: Identifiable {
 
 enum CommandBuilder {
     static func build(scanner: ProjectScanner) -> [PaletteCommand] {
-        var commands: [PaletteCommand] = []
+        var projectCmds: [PaletteCommand] = []
+        var windowCmds: [PaletteCommand] = []
         let terminal = Preferences.shared.terminal
 
         for project in scanner.projects {
             if project.isRunning {
-                // Attach
-                commands.append(PaletteCommand(
+                // Project actions
+                projectCmds.append(PaletteCommand(
                     id: "attach-\(project.id)",
                     title: "Attach \(project.name)",
                     subtitle: "Open terminal to running session",
@@ -84,8 +85,8 @@ enum CommandBuilder {
                     badge: "running",
                     action: { SessionManager.launch(project: project) }
                 ))
-                // Go to Window
-                commands.append(PaletteCommand(
+                // Window actions
+                windowCmds.append(PaletteCommand(
                     id: "goto-\(project.id)",
                     title: "Go to \(project.name)",
                     subtitle: "Focus the terminal window",
@@ -99,8 +100,7 @@ enum CommandBuilder {
                         )
                     }
                 ))
-                // Tile Left
-                commands.append(PaletteCommand(
+                windowCmds.append(PaletteCommand(
                     id: "tile-left-\(project.id)",
                     title: "Tile \(project.name) Left",
                     subtitle: "Snap window to left half",
@@ -111,8 +111,7 @@ enum CommandBuilder {
                         WindowTiler.tile(session: project.sessionName, terminal: terminal, to: .left)
                     }
                 ))
-                // Tile Right
-                commands.append(PaletteCommand(
+                windowCmds.append(PaletteCommand(
                     id: "tile-right-\(project.id)",
                     title: "Tile \(project.name) Right",
                     subtitle: "Snap window to right half",
@@ -123,8 +122,7 @@ enum CommandBuilder {
                         WindowTiler.tile(session: project.sessionName, terminal: terminal, to: .right)
                     }
                 ))
-                // Maximize
-                commands.append(PaletteCommand(
+                windowCmds.append(PaletteCommand(
                     id: "tile-max-\(project.id)",
                     title: "Maximize \(project.name)",
                     subtitle: "Expand window to fill screen",
@@ -135,8 +133,7 @@ enum CommandBuilder {
                         WindowTiler.tile(session: project.sessionName, terminal: terminal, to: .maximize)
                     }
                 ))
-                // Detach
-                commands.append(PaletteCommand(
+                windowCmds.append(PaletteCommand(
                     id: "detach-\(project.id)",
                     title: "Detach \(project.name)",
                     subtitle: "Disconnect clients, keep session alive",
@@ -145,8 +142,7 @@ enum CommandBuilder {
                     badge: nil,
                     action: { SessionManager.detach(project: project) }
                 ))
-                // Kill
-                commands.append(PaletteCommand(
+                windowCmds.append(PaletteCommand(
                     id: "kill-\(project.id)",
                     title: "Kill \(project.name)",
                     subtitle: "Terminate the tmux session",
@@ -155,9 +151,30 @@ enum CommandBuilder {
                     badge: nil,
                     action: { SessionManager.kill(project: project) }
                 ))
+                // Recovery commands
+                projectCmds.append(PaletteCommand(
+                    id: "sync-\(project.id)",
+                    title: "Sync \(project.name)",
+                    subtitle: "Reconcile session to declared config",
+                    icon: "arrow.triangle.2.circlepath",
+                    category: .project,
+                    badge: nil,
+                    action: { SessionManager.sync(project: project) }
+                ))
+                // Per-pane restart commands
+                for paneName in project.paneNames {
+                    projectCmds.append(PaletteCommand(
+                        id: "restart-\(paneName)-\(project.id)",
+                        title: "Restart \(paneName) in \(project.name)",
+                        subtitle: "Kill and re-run the \(paneName) pane",
+                        icon: "arrow.counterclockwise",
+                        category: .project,
+                        badge: nil,
+                        action: { SessionManager.restart(project: project, paneName: paneName) }
+                    ))
+                }
             } else {
-                // Launch
-                commands.append(PaletteCommand(
+                projectCmds.append(PaletteCommand(
                     id: "launch-\(project.id)",
                     title: "Launch \(project.name)",
                     subtitle: project.paneSummary.isEmpty
@@ -170,6 +187,8 @@ enum CommandBuilder {
                 ))
             }
         }
+
+        var commands = projectCmds + windowCmds
 
         // App actions
         commands.append(PaletteCommand(

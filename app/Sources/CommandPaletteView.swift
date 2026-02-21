@@ -57,7 +57,7 @@ struct CommandPaletteView: View {
                     }
                 }
             }
-            .frame(maxHeight: 300)
+            .frame(minHeight: 280, maxHeight: 360)
 
             Rectangle()
                 .fill(Palette.border)
@@ -66,11 +66,11 @@ struct CommandPaletteView: View {
             // Footer hints
             footer
         }
-        .frame(width: 500)
+        .frame(width: 540)
         .background(Palette.bg)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Palette.borderLit, lineWidth: 0.5)
         )
         .onAppear {
@@ -238,15 +238,20 @@ struct CommandPaletteView: View {
 
     private func installKeyHandler() {
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let isSearchActive = isSearchFocused
+
             switch Int(event.keyCode) {
             case 125: // Down arrow
-                let count = filtered.count
-                if count > 0 {
-                    selectedIndex = min(selectedIndex + 1, count - 1)
-                }
+                moveDown()
                 return nil
             case 126: // Up arrow
-                selectedIndex = max(selectedIndex - 1, 0)
+                moveUp()
+                return nil
+            case 38 where !isSearchActive: // j (vim down) — only when not typing
+                moveDown()
+                return nil
+            case 40 where !isSearchActive: // k (vim up) — only when not typing
+                moveUp()
                 return nil
             case 36: // Return
                 let items = filtered
@@ -261,6 +266,17 @@ struct CommandPaletteView: View {
                 return event
             }
         }
+    }
+
+    private func moveDown() {
+        let count = filtered.count
+        if count > 0 {
+            selectedIndex = min(selectedIndex + 1, count - 1)
+        }
+    }
+
+    private func moveUp() {
+        selectedIndex = max(selectedIndex - 1, 0)
     }
 
     private func removeKeyHandler() {

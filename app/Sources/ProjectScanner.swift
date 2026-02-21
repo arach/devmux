@@ -46,6 +46,7 @@ class ProjectScanner: ObservableObject {
                 packageManager: pm,
                 hasConfig: true,
                 paneCount: paneInfo.count,
+                paneNames: paneInfo.names,
                 paneSummary: paneInfo.summary,
                 isRunning: false
             )
@@ -88,22 +89,21 @@ class ProjectScanner: ObservableObject {
         return (nil, pm)
     }
 
-    private func readPaneInfo(at configPath: String) -> (count: Int, summary: String) {
+    private func readPaneInfo(at configPath: String) -> (count: Int, names: [String], summary: String) {
         guard let data = FileManager.default.contents(atPath: configPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let panes = json["panes"] as? [[String: Any]]
-        else { return (2, "") }
+        else { return (2, ["claude", "server"], "") }
 
         let labels = panes.compactMap { pane -> String? in
             if let name = pane["name"] as? String { return name }
             if let cmd = pane["cmd"] as? String {
-                // Use last path component or short command
                 let parts = cmd.split(separator: " ")
                 return parts.first.map(String.init)
             }
             return nil
         }
-        return (panes.count, labels.joined(separator: " · "))
+        return (panes.count, labels, labels.joined(separator: " · "))
     }
 
     private func isSessionRunning(_ name: String) -> Bool {

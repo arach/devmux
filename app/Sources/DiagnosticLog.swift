@@ -72,7 +72,7 @@ final class DiagnosticWindow {
 
         let hosting = NSHostingController(rootView: view)
         let w = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 280),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 400),
             styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -91,7 +91,7 @@ final class DiagnosticWindow {
         // Position bottom-right of screen
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            let x = screenFrame.maxX - 440
+            let x = screenFrame.maxX - 580
             let y = screenFrame.minY + 20
             w.setFrameOrigin(NSPoint(x: x, y: y))
         }

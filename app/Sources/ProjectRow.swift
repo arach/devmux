@@ -5,6 +5,8 @@ struct ProjectRow: View {
     let onLaunch: () -> Void
     let onDetach: () -> Void
     let onKill: () -> Void
+    let onSync: () -> Void
+    let onRestart: (String?) -> Void
 
     @State private var isHovered = false
     @State private var showCoach = false
@@ -144,6 +146,13 @@ struct ProjectRow: View {
                         } label: {
                             Label(tile.label, systemImage: tile.icon)
                         }
+                    }
+                }
+                Divider()
+                Button("Sync Session") { onSync() }
+                Menu("Restart Pane") {
+                    ForEach(project.paneNames, id: \.self) { name in
+                        Button(name) { onRestart(name) }
                     }
                 }
                 Divider()

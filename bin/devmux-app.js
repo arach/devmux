@@ -156,6 +156,18 @@ if (cmd === "build") {
   } catch {
     console.log("devmux app is not running.");
   }
+} else if (cmd === "restart") {
+  // Quit → rebuild → relaunch
+  try { execSync("pkill -f DevmuxApp.app", { stdio: "pipe" }); } catch {}
+  if (!hasSwift()) {
+    console.error("Swift is required. Install with: xcode-select --install");
+    process.exit(1);
+  }
+  if (!buildFromSource()) {
+    console.error("Build failed.");
+    process.exit(1);
+  }
+  launch();
 } else {
   await ensureBinary();
   launch();

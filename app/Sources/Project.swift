@@ -9,6 +9,7 @@ struct Project: Identifiable {
     let packageManager: String?
     let hasConfig: Bool
     let paneCount: Int
+    let paneNames: [String]
     let paneSummary: String
     var isRunning: Bool
 
