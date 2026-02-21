@@ -33,8 +33,13 @@ final class CommandPaletteWindow {
 
         guard let scanner = scanner else { return }
 
-        // Ensure projects are up to date
-        scanner.refreshStatus()
+        // Ensure projects are up to date (full scan if list is empty,
+        // e.g. palette opened via hotkey before main popover appeared)
+        if scanner.projects.isEmpty {
+            scanner.scan()
+        } else {
+            scanner.refreshStatus()
+        }
 
         let commands = CommandBuilder.build(scanner: scanner)
         let view = CommandPaletteView(commands: commands) { [weak self] in

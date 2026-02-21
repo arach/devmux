@@ -1,0 +1,25 @@
+# devmux
+
+> Developer workspace launcher — Claude Code + dev server in tmux, with a native macOS menu bar app
+
+## Documentation
+
+- Concepts: /docs/concepts
+- Config: /docs/config
+- App: /docs/app
+
+## Concepts
+
+devmux is a developer workspace launcher. It creates pre-configured
+terminal layouts for your projects using tmux, so you can go from
+"I want to work on X" to a full development environment in one click.
+
+## Config
+
+Place a `.devmux.json` file in your project root to define your
+workspace layout. devmux reads this file when creating a session.
+
+## App
+
+The devmux menu bar app is a native macOS companion that lives in your
+menu bar and gives you quick access to all your devmux sessions.

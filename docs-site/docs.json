@@ -1,0 +1,26 @@
+{
+  "name": "devmux",
+  "groups": [
+    {
+      "id": "getting-started",
+      "title": "Getting Started",
+      "items": [
+        {
+          "id": "concepts",
+          "title": "Concepts",
+          "description": "Core ideas, glossary, and architecture of devmux"
+        },
+        {
+          "id": "config",
+          "title": "Configuration",
+          "description": "CLI commands, .devmux.json format, and tile positions"
+        },
+        {
+          "id": "app",
+          "title": "Menu Bar App",
+          "description": "Command palette, window tiling, and session management"
+        }
+      ]
+    }
+  ]
+}
