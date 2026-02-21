@@ -83,6 +83,9 @@ export default function App() {
             <span className="nav-name">devmux</span>
           </a>
           <div className="nav-links">
+            <a href="/docs/concepts" className="nav-link">
+              Docs
+            </a>
             <a href="#config" className="nav-link">
               Config
             </a>
@@ -140,15 +143,20 @@ export default function App() {
                 {copied ? <CheckIcon /> : <CopyIcon />}
               </button>
             </div>
-            <a
-              href="https://github.com/arach/devmux"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="star-link"
-            >
-              <StarIcon />
-              Star us on GitHub
-            </a>
+            <div className="hero-links">
+              <a
+                href="https://github.com/arach/devmux"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="star-link"
+              >
+                <StarIcon />
+                Star us on GitHub
+              </a>
+              <a href="/docs/concepts" className="docs-link">
+                Read the docs
+              </a>
+            </div>
           </div>
         </section>
 
@@ -298,6 +306,9 @@ export default function App() {
               @arach
             </a>
           </span>
+          <a href="/docs/concepts" className="footer-link">
+            Documentation
+          </a>
           <span>macOS only. Requires tmux.</span>
         </footer>
       </div>

@@ -261,13 +261,20 @@ code {
   height: 15px;
 }
 
-/* ── Star link ─────────────────────────────────────── */
+/* ── Hero links ────────────────────────────────────── */
+
+.hero-links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 14px;
+}
 
 .star-link {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-top: 14px;
   padding: 6px 14px;
   border-radius: 6px;
   font-size: 13px;
@@ -283,6 +290,21 @@ code {
 .star-link svg {
   width: 13px;
   height: 13px;
+}
+
+.docs-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  transition: all 0.15s;
+}
+
+.docs-link:hover {
+  color: var(--green);
 }
 
 /* ── Config section ────────────────────────────────── */
