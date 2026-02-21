@@ -3,7 +3,7 @@ import SwiftUI
 @main
 struct DevmuxApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var scanner = ProjectScanner()
+    @StateObject private var scanner = ProjectScanner.shared
 
     var body: some Scene {
         MenuBarExtra("Devmux", systemImage: "terminal") {

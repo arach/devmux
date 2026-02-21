@@ -28,7 +28,15 @@ class Preferences: ObservableObject {
             self.terminal = Terminal.installed.first ?? .terminal
         }
 
-        self.scanRoot = UserDefaults.standard.string(forKey: "scanRoot") ?? ""
+        let savedRoot = UserDefaults.standard.string(forKey: "scanRoot") ?? ""
+        if savedRoot.isEmpty {
+            // Auto-detect a reasonable default
+            let home = NSHomeDirectory()
+            let candidates = ["\(home)/dev", "\(home)/Developer", "\(home)/projects", "\(home)/src"]
+            self.scanRoot = candidates.first { FileManager.default.fileExists(atPath: $0) } ?? ""
+        } else {
+            self.scanRoot = savedRoot
+        }
 
         if let saved = UserDefaults.standard.string(forKey: "mode"),
            let m = InteractionMode(rawValue: saved) {

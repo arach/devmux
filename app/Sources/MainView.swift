@@ -4,6 +4,7 @@ struct MainView: View {
     @ObservedObject var scanner: ProjectScanner
     @StateObject private var prefs = Preferences.shared
     @State private var searchText = ""
+    @State private var hasCheckedSetup = false
     private var filtered: [Project] {
         if searchText.isEmpty { return scanner.projects }
         return scanner.projects.filter {
@@ -22,9 +23,12 @@ struct MainView: View {
         .background(PanelBackground())
         .preferredColorScheme(.dark)
         .onAppear {
-            if needsSetup {
+            if needsSetup && !hasCheckedSetup {
+                hasCheckedSetup = true
                 SettingsWindow.open(prefs: prefs, scanner: scanner)
             }
+            scanner.updateRoot(prefs.scanRoot)
+            scanner.scan()
         }
     }
 
@@ -132,6 +136,15 @@ struct MainView: View {
             }
             .buttonStyle(.plain)
             .help("Settings")
+
+            // Diagnostics toggle
+            Button { DiagnosticWindow.shared.toggle() } label: {
+                Image(systemName: "stethoscope")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(DiagnosticWindow.shared.isVisible ? Palette.running : Palette.textMuted)
+            }
+            .buttonStyle(.plain)
+            .help("Toggle diagnostics")
 
             Rectangle()
                 .fill(Palette.border)

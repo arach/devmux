@@ -8,6 +8,7 @@ struct ProjectRow: View {
 
     @State private var isHovered = false
     @State private var showCoach = false
+    @State private var showTilePicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,7 +18,7 @@ struct ProjectRow: View {
                     .fill(project.isRunning ? Palette.running : Palette.border)
                     .frame(width: 3, height: 32)
 
-                // Info
+                // Info — tap to highlight window
                 VStack(alignment: .leading, spacing: 3) {
                     Text(project.name)
                         .font(Typo.heading(13))
@@ -36,24 +37,33 @@ struct ProjectRow: View {
                             .lineLimit(1)
                     }
                 }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if project.isRunning {
+                        WindowTiler.highlightWindow(session: project.sessionName)
+                    }
+                }
 
                 Spacer()
-
-                // Pane count
-                if project.paneCount > 1 {
-                    HStack(spacing: 2) {
-                        ForEach(0..<project.paneCount, id: \.self) { _ in
-                            RoundedRectangle(cornerRadius: 1)
-                                .fill(Palette.textMuted)
-                                .frame(width: 4, height: 10)
-                        }
-                    }
-                    .padding(.trailing, 4)
-                }
 
                 // Actions
                 HStack(spacing: 4) {
                     if project.isRunning {
+                        Button(action: {
+                            withAnimation(.easeOut(duration: 0.15)) { showTilePicker.toggle() }
+                            if !showTilePicker {
+                                // Picker just opened — highlight the window
+                                WindowTiler.highlightWindow(session: project.sessionName)
+                            } else {
+                                WindowHighlight.shared.dismiss()
+                            }
+                        }) {
+                            Image(systemName: "rectangle.split.2x1")
+                                .font(.system(size: 10))
+                                .angularButton(Palette.textDim, filled: false)
+                        }
+                        .buttonStyle(.plain)
+
                         Button(action: { handleDetach() }) {
                             Text("Detach")
                                 .angularButton(Palette.detach, filled: false)
@@ -80,13 +90,62 @@ struct ProjectRow: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
                 .padding(.top, 4)
             }
+
+            // Tile picker
+            if showTilePicker {
+                TilePickerView(
+                    sessionName: project.sessionName,
+                    terminal: Preferences.shared.terminal,
+                    onSelect: { position in
+                        WindowHighlight.shared.dismiss()
+                        WindowTiler.tile(
+                            session: project.sessionName,
+                            terminal: Preferences.shared.terminal,
+                            to: position
+                        )
+                        withAnimation(.easeOut(duration: 0.15)) { showTilePicker = false }
+                    },
+                    onGoToSpace: { spaceId in
+                        WindowHighlight.shared.dismiss()
+                        WindowTiler.switchToSpace(spaceId: spaceId)
+                        withAnimation(.easeOut(duration: 0.15)) { showTilePicker = false }
+                    },
+                    onDismiss: {
+                        WindowHighlight.shared.dismiss()
+                        withAnimation(.easeOut(duration: 0.15)) { showTilePicker = false }
+                    }
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .padding(.top, 4)
+            }
         }
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
         .contextMenu {
             if project.isRunning {
                 Button("Attach") { onLaunch() }
+                Button {
+                    WindowTiler.navigateToWindow(
+                        session: project.sessionName,
+                        terminal: Preferences.shared.terminal
+                    )
+                } label: {
+                    Label("Go to Window", systemImage: "macwindow")
+                }
                 Button("Detach") { onDetach() }
+                Menu("Tile Window") {
+                    ForEach(TilePosition.allCases) { tile in
+                        Button {
+                            WindowTiler.tile(
+                                session: project.sessionName,
+                                terminal: Preferences.shared.terminal,
+                                to: tile
+                            )
+                        } label: {
+                            Label(tile.label, systemImage: tile.icon)
+                        }
+                    }
+                }
                 Divider()
                 Button("Kill Session") { onKill() }
             } else {

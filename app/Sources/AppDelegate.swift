@@ -7,8 +7,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
+        CommandPaletteWindow.shared.configure(scanner: ProjectScanner.shared)
         HotkeyManager.shared.register {
-            // Toggle the MenuBarExtra by simulating a click on the status item
+            CommandPaletteWindow.shared.toggle()
         }
 
         // Style the MenuBarExtra panel when it appears

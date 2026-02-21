@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
@@ -33,8 +34,13 @@ function sessionExists(name) {
   return runQuiet(`tmux has-session -t "${name}" 2>&1`) !== null;
 }
 
+function pathHash(dir) {
+  return createHash("sha256").update(resolve(dir)).digest("hex").slice(0, 6);
+}
+
 function toSessionName(dir) {
-  return basename(dir).replace(/[^a-zA-Z0-9_-]/g, "-");
+  const base = basename(dir).replace(/[^a-zA-Z0-9_-]/g, "-");
+  return `${base}-${pathHash(dir)}`;
 }
 
 function esc(str) {
@@ -145,19 +151,23 @@ function createSession(dir) {
   // Get actual pane IDs (works regardless of base-index / pane-base-index)
   const paneIds = getPaneIds(name);
 
-  // Send commands to each pane by ID
+  // Send commands and name each pane
   for (let i = 0; i < panes.length && i < paneIds.length; i++) {
     if (panes[i].cmd) {
       run(`tmux send-keys -t "${paneIds[i]}" '${esc(panes[i].cmd)}' Enter`);
     }
+    if (panes[i].name) {
+      runQuiet(`tmux select-pane -t "${paneIds[i]}" -T "${panes[i].name}"`);
+    }
   }
 
   // Tag the terminal window title so the menu bar app can find it
+  // Format: [devmux:session-hash] pane_title: current_command
   runQuiet(`tmux set-option -t "${name}" set-titles on`);
-  runQuiet(`tmux set-option -t "${name}" set-titles-string "[devmux:${name}] #{pane_current_command}"`);
+  runQuiet(`tmux set-option -t "${name}" set-titles-string "[devmux:${name}] #{pane_title}"`);
 
-  // Name the window and focus the first pane
-  runQuiet(`tmux rename-window -t "${name}" "dev"`);
+  // Name the tmux window after the project and focus the first pane
+  runQuiet(`tmux rename-window -t "${name}" "${basename(dir)}"`);
   if (paneIds.length) {
     run(`tmux select-pane -t "${paneIds[0]}"`);
   }
@@ -295,6 +305,67 @@ function killSession(name) {
   console.log(`Killed "${name}".`);
 }
 
+// ── Window tiling ────────────────────────────────────────────────────
+
+function getScreenBounds() {
+  // Get the visible area (excludes menu bar and dock) in AppleScript coordinates (top-left origin)
+  const script = `
+    tell application "Finder"
+      set db to bounds of window of desktop
+    end tell
+    -- db = {left, top, right, bottom} of usable desktop
+    return (item 1 of db) & "," & (item 2 of db) & "," & (item 3 of db) & "," & (item 4 of db)`;
+  const out = runQuiet(`osascript -e '${esc(script)}'`);
+  if (!out) return { x: 0, y: 25, w: 1920, h: 1055 };
+  const [x, y, right, bottom] = out.split(",").map(s => parseInt(s.trim()));
+  return { x, y, w: right - x, h: bottom - y };
+}
+
+// Presets return AppleScript bounds: [left, top, right, bottom] within the visible area
+const tilePresets = {
+  "left":         (s) => [s.x, s.y, s.x + s.w / 2, s.y + s.h],
+  "left-half":    (s) => [s.x, s.y, s.x + s.w / 2, s.y + s.h],
+  "right":        (s) => [s.x + s.w / 2, s.y, s.x + s.w, s.y + s.h],
+  "right-half":   (s) => [s.x + s.w / 2, s.y, s.x + s.w, s.y + s.h],
+  "top":          (s) => [s.x, s.y, s.x + s.w, s.y + s.h / 2],
+  "top-half":     (s) => [s.x, s.y, s.x + s.w, s.y + s.h / 2],
+  "bottom":       (s) => [s.x, s.y + s.h / 2, s.x + s.w, s.y + s.h],
+  "bottom-half":  (s) => [s.x, s.y + s.h / 2, s.x + s.w, s.y + s.h],
+  "top-left":     (s) => [s.x, s.y, s.x + s.w / 2, s.y + s.h / 2],
+  "top-right":    (s) => [s.x + s.w / 2, s.y, s.x + s.w, s.y + s.h / 2],
+  "bottom-left":  (s) => [s.x, s.y + s.h / 2, s.x + s.w / 2, s.y + s.h],
+  "bottom-right": (s) => [s.x + s.w / 2, s.y + s.h / 2, s.x + s.w, s.y + s.h],
+  "maximize":     (s) => [s.x, s.y, s.x + s.w, s.y + s.h],
+  "max":          (s) => [s.x, s.y, s.x + s.w, s.y + s.h],
+  "center":       (s) => {
+    const mw = Math.round(s.w * 0.7);
+    const mh = Math.round(s.h * 0.8);
+    const mx = s.x + Math.round((s.w - mw) / 2);
+    const my = s.y + Math.round((s.h - mh) / 2);
+    return [mx, my, mx + mw, my + mh];
+  },
+};
+
+function tileWindow(position) {
+  const preset = tilePresets[position];
+  if (!preset) {
+    console.log(`Unknown position: ${position}`);
+    console.log(`Available: ${Object.keys(tilePresets).filter(k => !k.includes("-half") && k !== "max").join(", ")}`);
+    return;
+  }
+  const screen = getScreenBounds();
+  const [x1, y1, x2, y2] = preset(screen).map(Math.round);
+  const script = `
+    tell application "System Events"
+      set frontApp to name of first application process whose frontmost is true
+    end tell
+    tell application frontApp
+      set bounds of front window to {${x1}, ${y1}, ${x2}, ${y2}}
+    end tell`;
+  runQuiet(`osascript -e '${esc(script)}'`);
+  console.log(`Tiled → ${position}`);
+}
+
 function createOrAttach() {
   const dir = process.cwd();
   const name = toSessionName(dir);
@@ -342,6 +413,16 @@ switch (command) {
   case "kill":
   case "rm":
     killSession(args[1]);
+    break;
+  case "tile":
+  case "t":
+    if (args[1]) {
+      tileWindow(args[1]);
+    } else {
+      console.log("Usage: devmux tile <position>\n");
+      console.log("Positions: left, right, top, bottom, top-left, top-right,");
+      console.log("           bottom-left, bottom-right, maximize, center");
+    }
     break;
   case "app": {
     // Forward to devmux-app script

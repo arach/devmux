@@ -1,6 +1,8 @@
 import Foundation
 
 class ProjectScanner: ObservableObject {
+    static let shared = ProjectScanner()
+
     @Published var projects: [Project] = []
 
     private var scanRoot: String
@@ -35,11 +37,8 @@ class ProjectScanner: ObservableObject {
             let name = (projectPath as NSString).lastPathComponent
             let (devCmd, pm) = detectDevCommand(at: projectPath)
             let paneInfo = readPaneInfo(at: configPath)
-            let sName = name.replacingOccurrences(
-                of: "[^a-zA-Z0-9_-]", with: "-", options: .regularExpression
-            )
 
-            found.append(Project(
+            var project = Project(
                 id: projectPath,
                 path: projectPath,
                 name: name,
@@ -48,8 +47,10 @@ class ProjectScanner: ObservableObject {
                 hasConfig: true,
                 paneCount: paneInfo.count,
                 paneSummary: paneInfo.summary,
-                isRunning: isSessionRunning(sName)
-            ))
+                isRunning: false
+            )
+            project.isRunning = isSessionRunning(project.sessionName)
+            found.append(project)
         }
 
         DispatchQueue.main.async { self.projects = found }

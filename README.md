@@ -94,7 +94,7 @@ devmux app quit     # Stop the menu bar app
 Features:
 - See all projects and their session status at a glance
 - Launch, attach, or detach sessions with a click
-- Global hotkey: `Cmd+Shift+D`
+- **Command palette** (`Cmd+Shift+M`): Raycast-style launcher for all actions — fuzzy search, keyboard navigation, instant access to projects, window tiling, and settings
 - Auto-scans your project directories
 - Built with SwiftUI, runs natively on macOS
 
