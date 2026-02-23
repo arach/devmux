@@ -19,6 +19,11 @@
           "id": "app",
           "title": "Menu Bar App",
           "description": "Command palette, window tiling, and session management"
+        },
+        {
+          "id": "layers",
+          "title": "Workspace Layers",
+          "description": "Group projects into switchable layers for context switching"
         }
       ]
     }

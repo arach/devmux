@@ -49,6 +49,15 @@ Available for running sessions:
 | Detach *project*              | Disconnect clients, keep session alive   |
 | Kill *project*                | Terminate the tmux session               |
 
+### Layer commands
+
+Available when `~/.devmux/workspace.json` is configured
+(see [Workspace Layers](/docs/layers)):
+
+| Command                     | Description                              |
+|-----------------------------|------------------------------------------|
+| Switch to Layer: *label*    | Focus and tile the layer's project windows |
+
 ### App commands
 
 | Command           | Description                              |
@@ -151,6 +160,7 @@ Shows keyboard shortcut reference:
 | Shortcut          | Action              |
 |-------------------|----------------------|
 | Cmd+Shift+M       | Open command palette |
+| Cmd+Option+1/2/3  | Switch workspace layer |
 | Ctrl+B  D         | Detach from session  |
 | Ctrl+B  X         | Kill current pane    |
 | Ctrl+B  Left/Right| Move between panes   |
