@@ -12,6 +12,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             CommandPaletteWindow.shared.toggle()
         }
 
+        // Register layer-switching hotkeys (Cmd+Option+1/2/3...)
+        let workspace = WorkspaceManager.shared
+        if let config = workspace.config {
+            HotkeyManager.shared.registerLayerHotkeys(count: config.layers.count) { index in
+                workspace.switchToLayer(index: index)
+            }
+        }
+
         // Style the MenuBarExtra panel when it appears
         NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
@@ -20,6 +28,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { note in
             guard let panel = note.object as? NSPanel else { return }
             Self.stylePanel(panel)
+        }
+
+        // Check macOS permissions (Accessibility, Screen Recording)
+        PermissionChecker.shared.check()
+
+        // --diagnostics flag: auto-open diagnostics panel on launch
+        if CommandLine.arguments.contains("--diagnostics") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                DiagnosticWindow.shared.show()
+            }
         }
     }
 

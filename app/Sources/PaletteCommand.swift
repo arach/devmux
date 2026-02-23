@@ -188,7 +188,62 @@ enum CommandBuilder {
             }
         }
 
+        // Move-to-space commands for running projects
+        let allSpaces = WindowTiler.getDisplaySpaces().flatMap(\.spaces)
+        if allSpaces.count > 1 {
+            for project in scanner.projects where project.isRunning {
+                let tag = Terminal.windowTag(for: project.sessionName)
+                var windowSpaces: [Int] = []
+                if let (w, _) = WindowTiler.findWindow(tag: tag) {
+                    windowSpaces = WindowTiler.getSpacesForWindow(w)
+                }
+
+                for space in allSpaces {
+                    let isCurrentSpace = windowSpaces.contains(space.id)
+                    windowCmds.append(PaletteCommand(
+                        id: "move-space\(space.index)-\(project.id)",
+                        title: "Move \(project.name) to Space \(space.index)",
+                        subtitle: isCurrentSpace ? "Window is already here" : "Move window to Space \(space.index)",
+                        icon: "rectangle.on.rectangle",
+                        category: .window,
+                        badge: isCurrentSpace ? "current" : nil,
+                        action: {
+                            let result = WindowTiler.moveWindowToSpace(
+                                session: project.sessionName,
+                                terminal: terminal,
+                                spaceId: space.id
+                            )
+                            if case .success = result {
+                                WindowTiler.switchToSpace(spaceId: space.id)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                    WindowTiler.highlightWindow(session: project.sessionName)
+                                }
+                            }
+                        }
+                    ))
+                }
+            }
+        }
+
         var commands = projectCmds + windowCmds
+
+        // Layer switching commands
+        let workspace = WorkspaceManager.shared
+        if let wsConfig = workspace.config {
+            for (i, layer) in wsConfig.layers.enumerated() {
+                let layerIndex = i
+                let isActive = i == workspace.activeLayerIndex
+                commands.append(PaletteCommand(
+                    id: "layer-\(layer.id)",
+                    title: "Switch to Layer: \(layer.label)",
+                    subtitle: "\(layer.projects.count) project\(layer.projects.count == 1 ? "" : "s") \u{2014} \u{2325}\(i + 1)",
+                    icon: "square.stack.3d.up",
+                    category: .app,
+                    badge: isActive ? "active" : nil,
+                    action: { workspace.switchToLayer(index: layerIndex) }
+                ))
+            }
+        }
 
         // App actions
         commands.append(PaletteCommand(

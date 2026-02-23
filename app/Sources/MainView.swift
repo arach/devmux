@@ -3,8 +3,11 @@ import SwiftUI
 struct MainView: View {
     @ObservedObject var scanner: ProjectScanner
     @StateObject private var prefs = Preferences.shared
+    @StateObject private var permChecker = PermissionChecker.shared
+    @ObservedObject private var workspace = WorkspaceManager.shared
     @State private var searchText = ""
     @State private var hasCheckedSetup = false
+    @State private var bannerDismissed = false
     private var filtered: [Project] {
         if searchText.isEmpty { return scanner.projects }
         return scanner.projects.filter {
@@ -29,6 +32,8 @@ struct MainView: View {
             }
             scanner.updateRoot(prefs.scanRoot)
             scanner.scan()
+            permChecker.check()
+            bannerDismissed = false
         }
     }
 
@@ -49,11 +54,19 @@ struct MainView: View {
 
                 Spacer()
 
+                headerButton(icon: "arrow.up.left.and.arrow.down.right") {
+                    MainWindow.shared.show()
+                }
                 headerButton(icon: "arrow.clockwise") { scanner.scan() }
             }
             .padding(.horizontal, 18)
             .padding(.top, 14)
             .padding(.bottom, 10)
+
+            // Layer switcher
+            if let config = workspace.config, config.layers.count > 1 {
+                layerBar(config: config)
+            }
 
             // Search
             HStack(spacing: 8) {
@@ -81,6 +94,11 @@ struct MainView: View {
             )
             .padding(.horizontal, 14)
             .padding(.bottom, 10)
+
+            // Permission banner
+            if !permChecker.allGranted && !bannerDismissed {
+                permissionBanner
+            }
 
             Rectangle()
                 .fill(Palette.border)
@@ -146,12 +164,19 @@ struct MainView: View {
 
             // Diagnostics toggle
             Button { DiagnosticWindow.shared.toggle() } label: {
-                Image(systemName: "stethoscope")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(DiagnosticWindow.shared.isVisible ? Palette.running : Palette.textMuted)
+                HStack(spacing: 3) {
+                    Image(systemName: "stethoscope")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DiagnosticWindow.shared.isVisible ? Palette.running : Palette.textMuted)
+                    if !permChecker.allGranted {
+                        Circle()
+                            .fill(Palette.detach)
+                            .frame(width: 5, height: 5)
+                    }
+                }
             }
             .buttonStyle(.plain)
-            .help("Toggle diagnostics")
+            .help(!permChecker.allGranted ? "Permissions missing — open diagnostics" : "Toggle diagnostics")
 
             Rectangle()
                 .fill(Palette.border)
@@ -234,6 +259,128 @@ struct MainView: View {
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
         }
+    }
+
+    // MARK: - Permission banner
+
+    private var permissionBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(Palette.detach)
+                Text("PERMISSIONS NEEDED")
+                    .font(Typo.monoBold(10))
+                    .foregroundColor(Palette.detach)
+                Spacer()
+                Button { bannerDismissed = true } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(Palette.textMuted)
+                }
+                .buttonStyle(.plain)
+            }
+
+            permissionRow("Accessibility", granted: permChecker.accessibility) {
+                permChecker.requestAccessibility()
+            }
+            permissionRow("Screen Recording", granted: permChecker.screenRecording) {
+                permChecker.requestScreenRecording()
+            }
+
+            Text("Click a row to request access.")
+                .font(Typo.mono(9))
+                .foregroundColor(Palette.textMuted)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Palette.detach.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(Palette.detach.opacity(0.20), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 10)
+    }
+
+    private func permissionRow(_ name: String, granted: Bool, open: @escaping () -> Void) -> some View {
+        Button(action: { if !granted { open() } }) {
+            HStack(spacing: 6) {
+                Image(systemName: granted ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 10))
+                    .foregroundColor(granted ? Palette.running : Palette.detach)
+                Text(name)
+                    .font(Typo.mono(10))
+                    .foregroundColor(Palette.text)
+                Spacer()
+                if granted {
+                    Text("granted")
+                        .font(Typo.mono(9))
+                        .foregroundColor(Palette.running)
+                } else {
+                    HStack(spacing: 4) {
+                        Text("not set")
+                            .font(Typo.mono(9))
+                            .foregroundColor(Palette.detach)
+                        Image(systemName: "arrow.up.forward.square")
+                            .font(.system(size: 9))
+                            .foregroundColor(Palette.detach)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(granted ? Color.clear : Palette.detach.opacity(0.06))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(granted)
+    }
+
+    // MARK: - Layer Bar
+
+    private func layerBar(config: WorkspaceConfig) -> some View {
+        HStack(spacing: 6) {
+            ForEach(Array(config.layers.enumerated()), id: \.element.id) { i, layer in
+                let isActive = i == workspace.activeLayerIndex
+                Button {
+                    workspace.switchToLayer(index: i)
+                } label: {
+                    VStack(spacing: 2) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(isActive ? Palette.running : Palette.textMuted.opacity(0.4))
+                                .frame(width: 6, height: 6)
+                            Text(layer.label)
+                                .font(Typo.mono(11))
+                                .foregroundColor(isActive ? Palette.text : Palette.textDim)
+                        }
+                        Text("\u{2325}\(i + 1)")
+                            .font(Typo.mono(8))
+                            .foregroundColor(Palette.textMuted.opacity(0.6))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(isActive ? Palette.running.opacity(0.1) : Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .strokeBorder(isActive ? Palette.running.opacity(0.3) : Palette.border, lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(workspace.isSwitching)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Helpers

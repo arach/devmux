@@ -16,9 +16,14 @@ enum SessionManager {
 
     /// Detach all clients from a tmux session (keeps it running)
     static func detach(project: Project) {
+        detachByName(project.sessionName)
+    }
+
+    /// Detach all clients by session name string (for layer switching without a Project object)
+    static func detachByName(_ sessionName: String) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: tmuxPath)
-        task.arguments = ["detach-client", "-s", project.sessionName]
+        task.arguments = ["detach-client", "-s", sessionName]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try? task.run()
