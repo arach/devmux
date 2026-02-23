@@ -121,12 +121,9 @@ function createSession(dir) {
     panes = resolvePane(config.panes, dir);
     console.log(`Using .devmux.json (${panes.length} panes)`);
   } else {
-    const devCmd = detectDevCommand(dir);
-    panes = [
-      { name: "claude", cmd: "claude", size: 60 },
-      { name: "server", cmd: devCmd || undefined },
-    ];
-    if (devCmd) console.log(`Detected: ${devCmd}`);
+    panes = defaultPanes(dir);
+    if (panes.length > 1) console.log(`Detected: ${panes[1].cmd}`);
+    else console.log(`No dev server detected — single pane`);
   }
 
   // Create session (targets are config-agnostic — no hardcoded indices)
@@ -184,11 +181,7 @@ function restoreCommands(name, dir, mode) {
   if (config?.panes?.length) {
     panes = resolvePane(config.panes, dir);
   } else {
-    const devCmd = detectDevCommand(dir);
-    panes = [
-      { name: "claude", cmd: "claude", size: 60 },
-      { name: "server", cmd: devCmd || undefined },
-    ];
+    panes = defaultPanes(dir);
   }
 
   const paneIds = getPaneIds(name);
@@ -222,11 +215,19 @@ function resolvePanes(dir) {
   if (config?.panes?.length) {
     return resolvePane(config.panes, dir);
   }
+  return defaultPanes(dir);
+}
+
+function defaultPanes(dir) {
   const devCmd = detectDevCommand(dir);
-  return [
-    { name: "claude", cmd: "claude", size: 60 },
-    { name: "server", cmd: devCmd || undefined },
-  ];
+  if (devCmd) {
+    return [
+      { name: "claude", cmd: "claude", size: 60 },
+      { name: "server", cmd: devCmd },
+    ];
+  }
+  // No dev server detected → single pane
+  return [{ name: "claude", cmd: "claude" }];
 }
 
 function syncSession() {
@@ -434,14 +435,15 @@ Recovery:
                                devmux restart 1       (restarts pane at index 1)
 
 Layouts:
+  1 pane   →  single full-width (default when no dev server detected)
   2 panes  →  side-by-side split
   3+ panes →  main-vertical (first pane left, rest stacked right)
 
-  ┌──────────┬─────────┐    ┌──────────┬─────────┐
-  │  claude   │ server  │    │  claude   │ server  │
-  │  (60%)   │ (40%)   │    │  (60%)   ├─────────┤
-  └──────────┴─────────┘    │          │ tests   │
-                             └──────────┴─────────┘
+  ┌────────────────────┐    ┌──────────┬─────────┐    ┌──────────┬─────────┐
+  │      claude         │    │  claude   │ server  │    │  claude   │ server  │
+  │                     │    │  (60%)   │ (40%)   │    │  (60%)   ├─────────┤
+  └────────────────────┘    └──────────┴─────────┘    │          │ tests   │
+                                                       └──────────┴─────────┘
 `);
 }
 
@@ -454,13 +456,10 @@ function initConfig() {
     return;
   }
 
-  const devCmd = detectDevCommand(dir);
+  const panes = defaultPanes(dir);
   const config = {
     ensure: true,
-    panes: [
-      { name: "claude", cmd: "claude", size: 60 },
-      { name: "server", cmd: devCmd || "echo 'no dev server detected'" },
-    ],
+    panes,
   };
 
   writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");

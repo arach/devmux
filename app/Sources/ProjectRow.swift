@@ -11,6 +11,8 @@ struct ProjectRow: View {
     @State private var isHovered = false
     @State private var showCoach = false
     @State private var showTilePicker = false
+    @State private var contextSpaces: [SpaceInfo] = []
+    @State private var windowInfo: WindowTiler.WindowInfo?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,16 +29,23 @@ struct ProjectRow: View {
                         .foregroundColor(Palette.text)
                         .lineLimit(1)
 
-                    if !project.paneSummary.isEmpty {
-                        Text(project.paneSummary)
-                            .font(Typo.mono(10))
-                            .foregroundColor(Palette.textMuted)
-                            .lineLimit(1)
-                    } else if let cmd = project.devCommand {
-                        Text(cmd)
-                            .font(Typo.mono(10))
-                            .foregroundColor(Palette.textMuted)
-                            .lineLimit(1)
+                    HStack(spacing: 6) {
+                        if !project.paneSummary.isEmpty {
+                            Text(project.paneSummary)
+                                .font(Typo.mono(10))
+                                .foregroundColor(Palette.textMuted)
+                                .lineLimit(1)
+                        } else if let cmd = project.devCommand {
+                            Text(cmd)
+                                .font(Typo.mono(10))
+                                .foregroundColor(Palette.textMuted)
+                                .lineLimit(1)
+                        }
+
+                        if project.isRunning, let info = windowInfo {
+                            Spacer(minLength: 4)
+                            locationBadge(info)
+                        }
                     }
                 }
                 .contentShape(Rectangle())
@@ -106,11 +115,28 @@ struct ProjectRow: View {
                             to: position
                         )
                         withAnimation(.easeOut(duration: 0.15)) { showTilePicker = false }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { refreshWindowInfo() }
                     },
                     onGoToSpace: { spaceId in
                         WindowHighlight.shared.dismiss()
-                        WindowTiler.switchToSpace(spaceId: spaceId)
+                        let result = WindowTiler.moveWindowToSpace(
+                            session: project.sessionName,
+                            terminal: Preferences.shared.terminal,
+                            spaceId: spaceId
+                        )
+                        if case .success = result {
+                            WindowTiler.switchToSpace(spaceId: spaceId)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                WindowTiler.highlightWindow(session: project.sessionName)
+                            }
+                        } else if case .alreadyOnSpace = result {
+                            WindowTiler.switchToSpace(spaceId: spaceId)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                WindowTiler.highlightWindow(session: project.sessionName)
+                            }
+                        }
                         withAnimation(.easeOut(duration: 0.15)) { showTilePicker = false }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { refreshWindowInfo() }
                     },
                     onDismiss: {
                         WindowHighlight.shared.dismiss()
@@ -123,6 +149,12 @@ struct ProjectRow: View {
         }
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
+        .onAppear {
+            if project.isRunning {
+                contextSpaces = WindowTiler.getDisplaySpaces().flatMap(\.spaces)
+                refreshWindowInfo()
+            }
+        }
         .contextMenu {
             if project.isRunning {
                 Button("Attach") { onLaunch() }
@@ -148,6 +180,30 @@ struct ProjectRow: View {
                         }
                     }
                 }
+                if !contextSpaces.isEmpty {
+                    Menu("Go to Space") {
+                        ForEach(contextSpaces) { space in
+                            Button {
+                                let result = WindowTiler.moveWindowToSpace(
+                                    session: project.sessionName,
+                                    terminal: Preferences.shared.terminal,
+                                    spaceId: space.id
+                                )
+                                if case .success = result {
+                                    WindowTiler.switchToSpace(spaceId: space.id)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                        WindowTiler.highlightWindow(session: project.sessionName)
+                                    }
+                                }
+                            } label: {
+                                Label(
+                                    "Space \(space.index)\(space.isCurrent ? " (current)" : "")",
+                                    systemImage: space.isCurrent ? "desktopcomputer" : "rectangle.on.rectangle"
+                                )
+                            }
+                        }
+                    }
+                }
                 Divider()
                 Button("Sync Session") { onSync() }
                 Menu("Restart Pane") {
@@ -160,6 +216,64 @@ struct ProjectRow: View {
             } else {
                 Button("Launch") { onLaunch() }
             }
+        }
+    }
+
+    // MARK: - Location Badge
+
+    @ViewBuilder
+    private func locationBadge(_ info: WindowTiler.WindowInfo) -> some View {
+        HStack(spacing: 3) {
+            // Multi-display prefix
+            if NSScreen.screens.count > 1 && info.displayIndex > 0 {
+                Text("D\(info.displayIndex + 1)")
+                    .font(Typo.mono(9))
+                    .foregroundColor(Palette.textMuted)
+                Text("\u{00B7}")
+                    .font(Typo.mono(9))
+                    .foregroundColor(Palette.textMuted)
+            }
+
+            // Space number
+            Text(circledDigit(info.spaceIndex))
+                .font(.system(size: 10))
+                .foregroundColor(Palette.textDim)
+
+            // Tile position icon
+            if let tile = info.tilePosition {
+                Image(systemName: tile.icon)
+                    .font(.system(size: 9))
+                    .foregroundColor(Palette.textMuted)
+            }
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Palette.surface.opacity(0.6))
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            WindowTiler.navigateToWindow(
+                session: project.sessionName,
+                terminal: Preferences.shared.terminal
+            )
+        }
+    }
+
+    private func circledDigit(_ n: Int) -> String {
+        let digits = ["\u{2776}","\u{2777}","\u{2778}","\u{2779}","\u{277A}","\u{277B}","\u{277C}","\u{277D}","\u{277E}"]
+        return n >= 1 && n <= 9 ? digits[n - 1] : "S\(n)"
+    }
+
+    private func refreshWindowInfo() {
+        guard project.isRunning else { windowInfo = nil; return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let info = WindowTiler.getWindowInfo(
+                session: project.sessionName,
+                terminal: Preferences.shared.terminal
+            )
+            DispatchQueue.main.async { windowInfo = info }
         }
     }
 

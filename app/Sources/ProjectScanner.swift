@@ -106,10 +106,12 @@ class ProjectScanner: ObservableObject {
         return (panes.count, labels, labels.joined(separator: " · "))
     }
 
+    private static let tmuxPath = "/opt/homebrew/bin/tmux"
+
     private func isSessionRunning(_ name: String) -> Bool {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = ["tmux", "has-session", "-t", name]
+        task.executableURL = URL(fileURLWithPath: Self.tmuxPath)
+        task.arguments = ["has-session", "-t", name]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try? task.run()

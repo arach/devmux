@@ -191,9 +191,30 @@ private enum CGS {
         guard let h = handle, let sym = dlsym(h, "SLSManagedDisplaySetCurrentSpace") else { return nil }
         return unsafeBitCast(sym, to: SetCurrentSpaceFunc.self)
     }()
+
+    // Move windows between spaces
+    typealias AddWindowsToSpacesFunc = @convention(c) (Int32, CFArray, CFArray) -> Void
+    typealias RemoveWindowsFromSpacesFunc = @convention(c) (Int32, CFArray, CFArray) -> Void
+
+    static let addWindowsToSpaces: AddWindowsToSpacesFunc? = {
+        guard let h = handle else { return nil }
+        guard let sym = dlsym(h, "CGSAddWindowsToSpaces") ?? dlsym(h, "SLSAddWindowsToSpaces") else { return nil }
+        return unsafeBitCast(sym, to: AddWindowsToSpacesFunc.self)
+    }()
+
+    static let removeWindowsFromSpaces: RemoveWindowsFromSpacesFunc? = {
+        guard let h = handle else { return nil }
+        guard let sym = dlsym(h, "CGSRemoveWindowsFromSpaces") ?? dlsym(h, "SLSRemoveWindowsFromSpaces") else { return nil }
+        return unsafeBitCast(sym, to: RemoveWindowsFromSpacesFunc.self)
+    }()
 }
 
 enum WindowTiler {
+    /// Whether CGS move-between-spaces APIs are available
+    static var canMoveWindowsBetweenSpaces: Bool {
+        CGS.addWindowsToSpaces != nil && CGS.removeWindowsFromSpaces != nil
+    }
+
     /// Convert fractional rect to AppleScript bounds {left, top, right, bottom}
     /// AppleScript uses top-left origin; NSScreen uses bottom-left origin
     private static func appleScriptBounds(for position: TilePosition, screen: NSScreen? = nil) -> (Int, Int, Int, Int) {
@@ -323,6 +344,90 @@ enum WindowTiler {
                 return
             }
         }
+    }
+
+    // MARK: - Move Window Between Spaces
+
+    enum MoveResult {
+        case success(method: String)
+        case alreadyOnSpace
+        case windowNotFound
+        case failed(reason: String)
+    }
+
+    /// Move a session's terminal window to a different Space.
+    /// Note: On macOS 14.5+ the CGS move APIs are silently denied.
+    /// When that happens we fall back to just switching the user's view.
+    static func moveWindowToSpace(session: String, terminal: Terminal, spaceId: Int) -> MoveResult {
+        let diag = DiagnosticLog.shared
+        let tag = Terminal.windowTag(for: session)
+        diag.info("moveWindowToSpace: session=\(session) tag=\(tag) targetSpace=\(spaceId)")
+
+        // Find the window — CG first, then AX→CG fallback
+        let wid: UInt32
+        if let (w, _) = findWindow(tag: tag) {
+            wid = w
+            diag.info("moveWindowToSpace: found via CG wid=\(w)")
+        } else if let (pid, axWindow) = findWindowViaAX(terminal: terminal, tag: tag),
+                  let w = matchCGWindow(pid: pid, axWindow: axWindow) {
+            wid = w
+            diag.info("moveWindowToSpace: found via AX→CG wid=\(w)")
+        } else {
+            diag.warn("moveWindowToSpace: window not found for tag \(tag) — switching view only")
+            switchToSpace(spaceId: spaceId)
+            return .windowNotFound
+        }
+
+        // Check current spaces
+        let currentSpaces = getSpacesForWindow(wid)
+        diag.info("moveWindowToSpace: wid=\(wid) currentSpaces=\(currentSpaces)")
+        if currentSpaces.contains(spaceId) {
+            diag.info("moveWindowToSpace: already on target space — switching view")
+            switchToSpace(spaceId: spaceId)
+            return .alreadyOnSpace
+        }
+
+        // Try CGS direct move (works on older macOS, silently denied on 14.5+)
+        if let result = moveViaCGS(wid: wid, fromSpaces: currentSpaces, toSpace: spaceId) {
+            return result
+        }
+
+        // CGS unavailable — just switch the user's view
+        diag.info("moveWindowToSpace: CGS unavailable, switching view to space")
+        switchToSpace(spaceId: spaceId)
+        return .success(method: "switch-view")
+    }
+
+    /// Attempt CGS-based window move. Returns nil if APIs are unavailable.
+    private static func moveViaCGS(wid: UInt32, fromSpaces: [Int], toSpace: Int) -> MoveResult? {
+        let diag = DiagnosticLog.shared
+        guard let mainConn = CGS.mainConnectionID,
+              let addToSpaces = CGS.addWindowsToSpaces,
+              let removeFromSpaces = CGS.removeWindowsFromSpaces else {
+            return nil
+        }
+
+        let cid = mainConn()
+        let windowArray = [NSNumber(value: wid)] as CFArray
+        let targetArray = [NSNumber(value: toSpace)] as CFArray
+
+        addToSpaces(cid, windowArray, targetArray)
+        if !fromSpaces.isEmpty {
+            let sourceArray = fromSpaces.map { NSNumber(value: $0) } as CFArray
+            removeFromSpaces(cid, windowArray, sourceArray)
+        }
+
+        // Verify the move took effect (macOS 14.5+ silently denies)
+        let newSpaces = getSpacesForWindow(wid)
+        if newSpaces.contains(toSpace) && !fromSpaces.allSatisfy({ newSpaces.contains($0) }) {
+            diag.success("moveViaCGS: successfully moved wid=\(wid) to space \(toSpace)")
+            return .success(method: "CGS")
+        }
+
+        // CGS was silently denied — switch the view instead
+        diag.warn("moveViaCGS: silently denied (macOS 14.5+ restriction) — switching view")
+        switchToSpace(spaceId: toSpace)
+        return .success(method: "switch-view")
     }
 
     /// Navigate to a session's window: switch to its Space, raise it, highlight it
@@ -586,6 +691,111 @@ enum WindowTiler {
             }
         }
         diag.error("highlight: no method found window — no highlight shown")
+    }
+
+    // MARK: - Window Info
+
+    struct WindowInfo {
+        let spaceIndex: Int           // 1-based space number
+        let displayIndex: Int         // 0-based display index
+        let tilePosition: TilePosition?  // inferred from bounds, nil if free-form
+        let wid: UInt32
+    }
+
+    /// Get spatial info for a session's terminal window (space, display, tile position)
+    static func getWindowInfo(session: String, terminal: Terminal) -> WindowInfo? {
+        let tag = Terminal.windowTag(for: session)
+
+        // Find the window
+        let wid: UInt32
+        if let (w, _) = findWindow(tag: tag) {
+            wid = w
+        } else if let (pid, axWindow) = findWindowViaAX(terminal: terminal, tag: tag),
+                  let w = matchCGWindow(pid: pid, axWindow: axWindow) {
+            wid = w
+        } else {
+            return nil
+        }
+
+        // Determine which space/display the window is on
+        let windowSpaces = getSpacesForWindow(wid)
+        let allDisplays = getDisplaySpaces()
+
+        var spaceIndex = 1
+        var displayIndex = 0
+
+        if let windowSpaceId = windowSpaces.first {
+            for display in allDisplays {
+                if let space = display.spaces.first(where: { $0.id == windowSpaceId }) {
+                    spaceIndex = space.index
+                    displayIndex = display.displayIndex
+                    break
+                }
+            }
+        }
+
+        let tile = inferTilePosition(wid: wid)
+
+        return WindowInfo(
+            spaceIndex: spaceIndex,
+            displayIndex: displayIndex,
+            tilePosition: tile,
+            wid: wid
+        )
+    }
+
+    /// Infer tile position from a window's current bounds relative to its screen
+    private static func inferTilePosition(wid: UInt32) -> TilePosition? {
+        guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        // Find the window's bounds
+        var windowRect = CGRect.zero
+        for info in windowList {
+            if let num = info[kCGWindowNumber as String] as? UInt32, num == wid,
+               let dict = info[kCGWindowBounds as String] as? NSDictionary {
+                CGRectMakeWithDictionaryRepresentation(dict, &windowRect)
+                break
+            }
+        }
+        guard windowRect.width > 0 else { return nil }
+
+        // Find which screen contains the window center
+        let centerX = windowRect.midX
+        let centerY = windowRect.midY
+        guard let primaryScreen = NSScreen.screens.first else { return nil }
+        let primaryHeight = primaryScreen.frame.height
+
+        // CG uses top-left origin; convert to NS bottom-left for screen matching
+        let nsCenterY = primaryHeight - centerY
+
+        let screen = NSScreen.screens.first(where: {
+            $0.frame.contains(NSPoint(x: centerX, y: nsCenterY))
+        }) ?? NSScreen.main ?? primaryScreen
+
+        let visible = screen.visibleFrame
+        let full = screen.frame
+
+        // Convert CG rect to fractional coordinates relative to visible frame
+        // CG top-left origin → visible frame top-left origin
+        let visTop = full.height - visible.maxY + full.origin.y
+        let fx = (windowRect.origin.x - visible.origin.x) / visible.width
+        let fy = (windowRect.origin.y - visTop) / visible.height
+        let fw = windowRect.width / visible.width
+        let fh = windowRect.height / visible.height
+
+        let tolerance: CGFloat = 0.05
+
+        for position in TilePosition.allCases {
+            let (px, py, pw, ph) = position.rect
+            if abs(fx - px) < tolerance && abs(fy - py) < tolerance &&
+               abs(fw - pw) < tolerance && abs(fh - ph) < tolerance {
+                return position
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Private

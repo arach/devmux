@@ -71,8 +71,14 @@ final class DiagnosticWindow {
         let view = DiagnosticOverlayView()
 
         let hosting = NSHostingController(rootView: view)
+        let screen = NSScreen.main
+        let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+        let panelWidth: CGFloat = 480
+        let panelHeight: CGFloat = max(600, floor(screenFrame.height * 0.55))
+        hosting.preferredContentSize = NSSize(width: panelWidth, height: panelHeight)
+
         let w = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
             styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -83,18 +89,15 @@ final class DiagnosticWindow {
         w.isMovableByWindowBackground = true
         w.level = .floating
         w.isOpaque = false
-        w.backgroundColor = .clear
+        w.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
         w.hasShadow = true
         w.alphaValue = 1.0
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        // Position bottom-right of screen
-        if let screen = NSScreen.main {
-            let screenFrame = screen.visibleFrame
-            let x = screenFrame.maxX - 580
-            let y = screenFrame.minY + 20
-            w.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        // Position: right edge, vertically centered
+        let x = screenFrame.maxX - panelWidth - 12
+        let y = screenFrame.minY + floor((screenFrame.height - panelHeight) / 2)
+        w.setFrameOrigin(NSPoint(x: x, y: y))
 
         w.orderFrontRegardless()
         window = w
@@ -107,8 +110,8 @@ final class DiagnosticWindow {
 
         // Show running sessions
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = ["tmux", "list-sessions", "-F", "#{session_name}"]
+        task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/tmux")
+        task.arguments = ["list-sessions", "-F", "#{session_name}"]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
@@ -189,7 +192,7 @@ struct DiagnosticOverlayView: View {
                 }
             }
         }
-        .frame(minWidth: 300, minHeight: 120)
+        .frame(minWidth: 420, idealWidth: 480, minHeight: 400, idealHeight: 600)
         .background(Color.black.opacity(0.75))
     }
 

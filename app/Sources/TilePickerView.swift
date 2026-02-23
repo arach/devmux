@@ -11,6 +11,7 @@ struct TilePickerView: View {
     @State private var hoveredSpace: Int?  // space ID
     @State private var displaySpaces: [DisplaySpaces] = []
     @State private var windowSpaceId: Int = 0
+    @State private var currentTile: TilePosition?
 
     private let grid: [[TilePosition]] = [
         [.topLeft, .topRight],
@@ -63,7 +64,9 @@ struct TilePickerView: View {
                         .padding(.vertical, 2)
 
                     HStack {
-                        Text(displaySpaces.count > 1 ? "DISPLAY \(display.displayIndex + 1)" : "GO TO SPACE")
+                        Text(displaySpaces.count > 1
+                            ? "DISPLAY \(display.displayIndex + 1) SPACES"
+                            : "GO TO SPACE")
                             .font(Typo.pixel(10))
                             .foregroundColor(Palette.textMuted)
                         Spacer()
@@ -96,32 +99,35 @@ struct TilePickerView: View {
         )
         .onAppear {
             displaySpaces = WindowTiler.getDisplaySpaces()
-            // Find which space this session's window is on
-            let tag = Terminal.windowTag(for: sessionName)
-            if let (wid, _) = WindowTiler.findWindow(tag: tag),
-               let space = WindowTiler.getSpacesForWindow(wid).first {
-                windowSpaceId = space
+            // Find which space this session's window is on + current tile
+            if let info = WindowTiler.getWindowInfo(session: sessionName, terminal: terminal) {
+                if let spaceId = WindowTiler.getSpacesForWindow(info.wid).first {
+                    windowSpaceId = spaceId
+                }
+                currentTile = info.tilePosition
             }
         }
     }
 
     private func tileCell(_ tile: TilePosition) -> some View {
-        Button {
+        let isCurrent = currentTile == tile
+        let isHovered = hoveredTile == tile
+        return Button {
             onSelect(tile)
         } label: {
             Image(systemName: tile.icon)
                 .font(.system(size: 14))
-                .foregroundColor(hoveredTile == tile ? Palette.running : Palette.textDim)
+                .foregroundColor(isHovered ? Palette.running : isCurrent ? Palette.running.opacity(0.8) : Palette.textDim)
                 .frame(maxWidth: .infinity)
                 .frame(height: 32)
                 .background(
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(hoveredTile == tile ? Palette.running.opacity(0.1) : Palette.bg)
+                        .fill(isHovered ? Palette.running.opacity(0.1) : isCurrent ? Palette.running.opacity(0.06) : Palette.bg)
                         .overlay(
                             RoundedRectangle(cornerRadius: 4)
                                 .strokeBorder(
-                                    hoveredTile == tile ? Palette.running.opacity(0.3) : Palette.border,
-                                    lineWidth: 0.5
+                                    isHovered ? Palette.running.opacity(0.3) : isCurrent ? Palette.running.opacity(0.25) : Palette.border,
+                                    lineWidth: isCurrent ? 1 : 0.5
                                 )
                         )
                 )
@@ -131,7 +137,9 @@ struct TilePickerView: View {
     }
 
     private func tileWideCell(_ tile: TilePosition) -> some View {
-        Button {
+        let isCurrent = currentTile == tile
+        let isHovered = hoveredTile == tile
+        return Button {
             onSelect(tile)
         } label: {
             HStack(spacing: 4) {
@@ -140,17 +148,17 @@ struct TilePickerView: View {
                 Text(tile.label)
                     .font(Typo.mono(10))
             }
-            .foregroundColor(hoveredTile == tile ? Palette.running : Palette.textDim)
+            .foregroundColor(isHovered ? Palette.running : isCurrent ? Palette.running.opacity(0.8) : Palette.textDim)
             .frame(maxWidth: .infinity)
             .frame(height: 28)
             .background(
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(hoveredTile == tile ? Palette.running.opacity(0.1) : Palette.bg)
+                    .fill(isHovered ? Palette.running.opacity(0.1) : isCurrent ? Palette.running.opacity(0.06) : Palette.bg)
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
                             .strokeBorder(
-                                hoveredTile == tile ? Palette.running.opacity(0.3) : Palette.border,
-                                lineWidth: 0.5
+                                isHovered ? Palette.running.opacity(0.3) : isCurrent ? Palette.running.opacity(0.25) : Palette.border,
+                                lineWidth: isCurrent ? 1 : 0.5
                             )
                     )
             )

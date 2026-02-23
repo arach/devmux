@@ -376,7 +376,7 @@ function buildHTML(tag) {
     <div class="left">
       <div class="tag">${tag}</div>
       <div class="title">devmux</div>
-      <div class="subtitle">Claude Code + dev server, side by side in tmux. One command, configurable layouts.</div>
+      <div class="subtitle">Declarative tmux sessions. Define your panes in JSON, run one command.</div>
       <div class="brand">
         <div class="brand-dot"></div>
         <span class="brand-name">arach/devmux</span>

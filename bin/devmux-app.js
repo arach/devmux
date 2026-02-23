@@ -35,12 +35,14 @@ function hasSwift() {
   }
 }
 
-function launch() {
+function launch(extraArgs = []) {
   if (isRunning()) {
     console.log("devmux app is already running.");
     return;
   }
-  spawn("open", [bundlePath], { detached: true, stdio: "ignore" }).unref();
+  const args = [bundlePath];
+  if (extraArgs.length) args.push("--args", ...extraArgs);
+  spawn("open", args, { detached: true, stdio: "ignore" }).unref();
   console.log("devmux app launched.");
 }
 
@@ -62,6 +64,23 @@ function buildFromSource() {
 
   mkdirSync(binaryDir, { recursive: true });
   execSync(`cp '${builtPath}' '${binaryPath}'`);
+
+  // Re-sign the bundle so macOS TCC recognizes a stable identity across rebuilds.
+  // Without this, each build gets a new ad-hoc signature and permission grants are lost.
+  try {
+    // Prefer a real signing identity for stable TCC grants; fall back to ad-hoc with fixed identifier
+    const identities = execSync("security find-identity -v -p codesigning", { stdio: "pipe" }).toString();
+    const devId = identities.match(/"(Apple Development:[^"]+)"/)?.[1]
+               || identities.match(/"(Developer ID Application:[^"]+)"/)?.[1];
+    const signArg = devId ? `'${devId}'` : "-";
+    execSync(
+      `codesign --force --sign ${signArg} --identifier com.arach.devmux '${bundlePath}'`,
+      { stdio: "pipe" }
+    );
+  } catch (e) {
+    // Non-fatal — app still works, just permissions won't persist across rebuilds
+    console.log("Warning: code signing failed — permissions may not persist across rebuilds.");
+  }
   console.log("Build complete.");
   return true;
 }
@@ -142,6 +161,9 @@ async function ensureBinary() {
 }
 
 const cmd = process.argv[2];
+const flags = process.argv.slice(3);
+const hasDiag = flags.includes("--diagnostics") || flags.includes("-d");
+const launchFlags = hasDiag ? ["--diagnostics"] : [];
 
 if (cmd === "build") {
   if (!hasSwift()) {
@@ -167,8 +189,8 @@ if (cmd === "build") {
     console.error("Build failed.");
     process.exit(1);
   }
-  launch();
+  launch(launchFlags);
 } else {
   await ensureBinary();
-  launch();
+  launch(launchFlags);
 }
