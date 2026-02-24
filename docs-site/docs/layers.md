@@ -100,6 +100,18 @@ header and search field in the menu bar panel:
 
 ## Layout examples
 
+### Single project
+
+```json
+{
+  "projects": [
+    { "path": "/Users/you/dev/talkie" }
+  ]
+}
+```
+
+No `tile` — just focuses the window wherever it is.
+
 ### Two-project split
 
 ```json
