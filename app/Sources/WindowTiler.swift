@@ -744,6 +744,31 @@ enum WindowTiler {
         )
     }
 
+    /// Infer tile position from a window frame + screen without re-querying CGWindowList
+    static func inferTilePosition(frame: WindowFrame, screen: NSScreen) -> TilePosition? {
+        let visible = screen.visibleFrame
+        let full = screen.frame
+
+        // CG top-left origin → visible frame top-left origin
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? full.height
+        let visTop = primaryHeight - visible.maxY
+        let fx = (frame.x - visible.origin.x) / visible.width
+        let fy = (frame.y - visTop) / visible.height
+        let fw = frame.w / visible.width
+        let fh = frame.h / visible.height
+
+        let tolerance: CGFloat = 0.05
+
+        for position in TilePosition.allCases {
+            let (px, py, pw, ph) = position.rect
+            if abs(fx - CGFloat(px)) < tolerance && abs(fy - CGFloat(py)) < tolerance &&
+               abs(fw - CGFloat(pw)) < tolerance && abs(fh - CGFloat(ph)) < tolerance {
+                return position
+            }
+        }
+        return nil
+    }
+
     /// Infer tile position from a window's current bounds relative to its screen
     private static func inferTilePosition(wid: UInt32) -> TilePosition? {
         guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
@@ -795,6 +820,168 @@ enum WindowTiler {
             }
         }
 
+        return nil
+    }
+
+    // MARK: - By-ID Window Operations (Desktop Inventory)
+
+    /// Navigate to an arbitrary window by its CG window ID: switch space, raise, highlight
+    static func navigateToWindowById(wid: UInt32, pid: Int32) {
+        let diag = DiagnosticLog.shared
+        diag.info("navigateToWindowById: wid=\(wid) pid=\(pid)")
+
+        // Switch to window's space if needed
+        let windowSpaces = getSpacesForWindow(wid)
+        let currentSpace = getCurrentSpace()
+
+        if let windowSpace = windowSpaces.first, windowSpace != currentSpace {
+            diag.info("Switching from space \(currentSpace) → \(windowSpace)")
+            switchToSpace(spaceId: windowSpace)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                raiseWindowById(wid: wid, pid: pid)
+                highlightWindowById(wid: wid)
+            }
+        } else {
+            raiseWindowById(wid: wid, pid: pid)
+            highlightWindowById(wid: wid)
+        }
+    }
+
+    /// Flash a highlight border on any window by its CG window ID
+    static func highlightWindowById(wid: UInt32) {
+        guard let frame = cgWindowFrame(wid: wid) else {
+            DiagnosticLog.shared.warn("highlightWindowById: no frame for wid=\(wid)")
+            return
+        }
+        DispatchQueue.main.async { WindowHighlight.shared.flash(frame: frame) }
+    }
+
+    /// Tile any window by its CG window ID to a position using AX API
+    static func tileWindowById(wid: UInt32, pid: Int32, to position: TilePosition) {
+        let diag = DiagnosticLog.shared
+        diag.info("tileWindowById: wid=\(wid) pid=\(pid) pos=\(position.rawValue)")
+
+        // Find the screen the window is on
+        guard let windowFrame = cgWindowFrame(wid: wid) else {
+            diag.warn("tileWindowById: no frame for wid=\(wid)")
+            return
+        }
+        let screen = NSScreen.screens.first(where: {
+            $0.frame.contains(NSPoint(x: windowFrame.midX, y: windowFrame.midY))
+        }) ?? NSScreen.main ?? NSScreen.screens[0]
+
+        let visible = screen.visibleFrame
+        let (fx, fy, fw, fh) = position.rect
+
+        // Calculate target in NS coordinates (bottom-left origin)
+        let targetX = visible.origin.x + visible.width * fx
+        let targetY = visible.origin.y + visible.height * (1.0 - fy - fh)
+        let targetW = visible.width * fw
+        let targetH = visible.height * fh
+
+        // Convert NS bottom-left → AX top-left origin
+        guard let primaryScreen = NSScreen.screens.first else { return }
+        let primaryHeight = primaryScreen.frame.height
+        let axX = targetX
+        let axY = primaryHeight - targetY - targetH
+
+        // Find the AX window matching this CG wid by frame comparison
+        guard let axWindow = findAXWindowByFrame(wid: wid, pid: pid) else {
+            diag.warn("tileWindowById: couldn't match AX window for wid=\(wid)")
+            return
+        }
+
+        // Set position and size via AX
+        var newPos = CGPoint(x: axX, y: axY)
+        var newSize = CGSize(width: targetW, height: targetH)
+
+        if let posValue = AXValueCreate(.cgPoint, &newPos) {
+            AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posValue)
+        }
+        if let sizeValue = AXValueCreate(.cgSize, &newSize) {
+            AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeValue)
+        }
+
+        diag.success("tileWindowById: tiled wid=\(wid) to \(position.rawValue)")
+    }
+
+    /// Get NSRect (bottom-left origin) for a known CG window ID
+    private static func cgWindowFrame(wid: UInt32) -> NSRect? {
+        guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        for info in windowList {
+            if let num = info[kCGWindowNumber as String] as? UInt32, num == wid,
+               let dict = info[kCGWindowBounds as String] as? NSDictionary {
+                var rect = CGRect.zero
+                if CGRectMakeWithDictionaryRepresentation(dict, &rect) {
+                    guard let primaryScreen = NSScreen.screens.first else { return nil }
+                    let primaryHeight = primaryScreen.frame.height
+                    return NSRect(
+                        x: rect.origin.x,
+                        y: primaryHeight - rect.origin.y - rect.height,
+                        width: rect.width,
+                        height: rect.height
+                    )
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Raise a window by matching its CG window ID to an AX element via frame comparison
+    private static func raiseWindowById(wid: UInt32, pid: Int32) {
+        let diag = DiagnosticLog.shared
+
+        if let axWindow = findAXWindowByFrame(wid: wid, pid: pid) {
+            AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+            diag.success("raiseWindowById: raised wid=\(wid)")
+        } else {
+            diag.warn("raiseWindowById: couldn't match AX window for wid=\(wid)")
+        }
+
+        if let app = NSRunningApplication(processIdentifier: pid) {
+            app.activate()
+        }
+    }
+
+    /// Find the AX window element for a given CG window ID by matching frames
+    private static func findAXWindowByFrame(wid: UInt32, pid: Int32) -> AXUIElement? {
+        // Get CG frame for the window
+        guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+
+        var cgRect = CGRect.zero
+        for info in windowList {
+            if let num = info[kCGWindowNumber as String] as? UInt32, num == wid,
+               let dict = info[kCGWindowBounds as String] as? NSDictionary {
+                CGRectMakeWithDictionaryRepresentation(dict, &cgRect)
+                break
+            }
+        }
+        guard cgRect.width > 0 else { return nil }
+
+        // Find AX window with matching frame
+        let appRef = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
+        guard err == .success, let windows = windowsRef as? [AXUIElement] else { return nil }
+
+        for win in windows {
+            var posRef: CFTypeRef?
+            var sizeRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef)
+            AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef)
+            guard let pv = posRef, let sv = sizeRef else { continue }
+
+            var pos = CGPoint.zero
+            var size = CGSize.zero
+            AXValueGetValue(pv as! AXValue, .cgPoint, &pos)
+            AXValueGetValue(sv as! AXValue, .cgSize, &size)
+
+            if abs(cgRect.origin.x - pos.x) < 2 && abs(cgRect.origin.y - pos.y) < 2 &&
+               abs(cgRect.width - size.width) < 2 && abs(cgRect.height - size.height) < 2 {
+                return win
+            }
+        }
         return nil
     }
 
