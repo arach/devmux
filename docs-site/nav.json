@@ -22,8 +22,8 @@
         },
         {
           "id": "layers",
-          "title": "Workspace Layers",
-          "description": "Group projects into switchable layers for context switching"
+          "title": "Layers & Tab Groups",
+          "description": "Switchable workspace layers and tabbed project groups"
         }
       ]
     }

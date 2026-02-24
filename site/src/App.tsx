@@ -248,6 +248,14 @@ export default function App() {
               instantly focus and tile a whole context.
             </p>
           </div>
+          <div className="feature">
+            <span className="feature-icon">&#9783;</span>
+            <h3>Tab groups</h3>
+            <p>
+              Bundle related projects as tabs in one window. iOS, macOS,
+              Web, API — one <code>devmux group</code> to launch them all.
+            </p>
+          </div>
         </section>
 
         {/* Menu bar app */}
@@ -268,6 +276,9 @@ export default function App() {
                 <li>Window tiling to halves, quarters, or full screen</li>
                 <li>
                   <a href="/docs/layers">Workspace layers</a> with <code>Cmd+Option+1/2/3</code>
+                </li>
+                <li>
+                  <a href="/docs/layers#tab-groups">Tab groups</a> — related projects as tabs in one session
                 </li>
                 <li>Space navigation and window highlighting</li>
               </ul>

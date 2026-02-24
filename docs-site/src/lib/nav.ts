@@ -1,4 +1,4 @@
-import docsJson from '../../docs.json'
+import docsJson from '../../nav.json'
 
 export type NavItem = {
   title: string

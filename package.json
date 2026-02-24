@@ -20,6 +20,9 @@
     "url": "https://github.com/arach/devmux"
   },
   "license": "MIT",
+  "scripts": {
+    "dev": "bun --cwd docs-site dev"
+  },
   "type": "module",
   "engines": {
     "node": ">=18"
