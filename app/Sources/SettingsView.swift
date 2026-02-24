@@ -228,7 +228,8 @@ struct SettingsView: View {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
                 Section(header: stickyHeader("App")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        shortcutRow("Open devmux", keys: ["Cmd", "Shift", "D"])
+                        shortcutRow("Command palette", keys: ["Cmd", "Shift", "M"])
+                        shortcutRow("Layer 1/2/3...", keys: ["Cmd", "Option", "1/2/3"])
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)

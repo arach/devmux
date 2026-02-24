@@ -234,10 +234,11 @@ export default function App() {
             </p>
           </div>
           <div className="feature">
-            <span className="feature-icon">&#9734;</span>
-            <h3>Zero deps</h3>
+            <span className="feature-icon">&#9638;</span>
+            <h3>Workspace layers</h3>
             <p>
-              Pure Node.js CLI. Just tmux and Node 18+.
+              Group projects into switchable layers. <code>Cmd+Option+1/2/3</code> to
+              instantly focus and tile a whole context.
             </p>
           </div>
         </section>
@@ -255,9 +256,13 @@ export default function App() {
                 <li>See all projects and session status</li>
                 <li>Launch, attach, or detach with a click</li>
                 <li>
-                  Global hotkey <code>Cmd+Shift+D</code>
+                  Command palette via <code>Cmd+Shift+M</code>
                 </li>
-                <li>Auto-scans your project directories</li>
+                <li>Window tiling to halves, quarters, or full screen</li>
+                <li>
+                  <a href="/docs/layers">Workspace layers</a> with <code>Cmd+Option+1/2/3</code>
+                </li>
+                <li>Space navigation and window highlighting</li>
               </ul>
             </div>
             <div className="app-screenshot-wrap">
