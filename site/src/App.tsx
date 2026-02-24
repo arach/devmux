@@ -173,6 +173,13 @@ export default function App() {
               </p>
               <div className="layouts">
                 <div className="layout-card">
+                  <h3>1 pane</h3>
+                  <p>Single focus</p>
+                  <div className="layout-diagram layout-1">
+                    <div className="layout-pane main">claude</div>
+                  </div>
+                </div>
+                <div className="layout-card">
                   <h3>2 panes</h3>
                   <p>Side-by-side</p>
                   <div className="layout-diagram layout-2">

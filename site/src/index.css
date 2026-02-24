@@ -416,6 +416,10 @@ code {
   overflow: hidden;
 }
 
+.layout-1 {
+  grid-template-columns: 1fr;
+}
+
 .layout-2 {
   grid-template-columns: 60fr 40fr;
 }
