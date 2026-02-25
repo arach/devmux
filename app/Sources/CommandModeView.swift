@@ -54,6 +54,29 @@ struct CommandModeView: View {
                 .font(Typo.monoBold(11))
                 .foregroundColor(Palette.text)
 
+            if isDesktopInventory {
+                Button(action: { state.copyInventoryToClipboard() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 9))
+                        Text("Copy")
+                            .font(Typo.mono(9))
+                    }
+                    .foregroundColor(Palette.textDim)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Palette.surface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 3)
+                                    .strokeBorder(Palette.border, lineWidth: 0.5)
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
             Spacer()
 
             if let layer = state.inventory.activeLayer {
@@ -463,20 +486,30 @@ struct CommandModeView: View {
                     chordHint(key: "esc", label: "back")
                     Spacer()
                 }
-            } else if isDesktopInventory && state.selectedWindowId != nil {
-                // Selection active hints
+            } else if isDesktopInventory && state.desktopMode == .actions {
+                // Action mode hints
                 HStack(spacing: 12) {
                     chordHint(key: "↩", label: "focus")
                     chordHint(key: "t", label: "tile")
                     chordHint(key: "h", label: "highlight")
-                    chordHint(key: "`", label: "chords")
                     chordHint(key: "esc", label: "back")
+                    Spacer()
+                }
+            } else if isDesktopInventory && state.selectedWindowId != nil {
+                // Selection active — browsing hints
+                HStack(spacing: 12) {
+                    chordHint(key: "↑↓", label: "navigate")
+                    chordHint(key: "←→", label: "display")
+                    chordHint(key: "↩", label: "actions")
+                    chordHint(key: "`", label: "chords")
+                    chordHint(key: "esc", label: "deselect")
                     Spacer()
                 }
             } else if isDesktopInventory {
                 // No selection — browsing hints
                 HStack(spacing: 12) {
                     chordHint(key: "↑↓", label: "navigate")
+                    chordHint(key: "←→", label: "display")
                     chordHint(key: "`", label: "chords")
                     chordHint(key: "esc", label: "back")
                     Spacer()

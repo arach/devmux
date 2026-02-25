@@ -40,7 +40,8 @@ struct Chord {
 
 enum DesktopInventoryMode: Equatable {
     case browsing
-    case tiling
+    case actions   // Enter on selection → action picker
+    case tiling    // t from actions → tile picker
 }
 
 // MARK: - State Machine
@@ -140,119 +141,188 @@ final class CommandModeState: ObservableObject {
     // MARK: - Desktop Inventory Key Handling
 
     private func handleDesktopInventoryKey(_ keyCode: UInt16) -> Bool {
-        if desktopMode == .tiling {
-            return handleTilingKey(keyCode)
+        switch desktopMode {
+        case .browsing: return handleBrowsingKey(keyCode)
+        case .actions:  return handleActionsKey(keyCode)
+        case .tiling:   return handleTilingKey(keyCode)
         }
-        return handleBrowsingKey(keyCode)
     }
+
+    // MARK: Browsing — ↑↓ within column, ←→ between displays, Enter → actions
 
     private func handleBrowsingKey(_ keyCode: UInt16) -> Bool {
         switch keyCode {
-        case 53: // Escape → back to chord view
-            selectedWindowId = nil
+        case 53: // Escape
+            if selectedWindowId != nil {
+                selectedWindowId = nil
+                return true
+            }
+            // No selection — back to chord view
             desktopMode = .browsing
             phase = .inventory
             onPanelResize?(chordPanelSize.0, chordPanelSize.1)
             return true
 
-        case 126, 38: // ↑ or j (keyCode 38 = j, 126 = up arrow)
-            // j should go down, up arrow goes up
-            if keyCode == 38 {
-                moveSelection(by: 1)  // j = down
+        case 126, 38: // ↑ or j
+            moveSelectionVertical(keyCode == 38 ? 1 : -1)
+            return true
+
+        case 125, 40: // ↓ or k
+            moveSelectionVertical(keyCode == 40 ? -1 : 1)
+            return true
+
+        case 123: // ← → jump to previous display
+            moveSelectionToDisplay(delta: -1)
+            return true
+
+        case 124: // → → jump to next display
+            moveSelectionToDisplay(delta: 1)
+            return true
+
+        case 36: // Enter → action mode (or select first if nothing selected)
+            if selectedWindowId != nil {
+                desktopMode = .actions
+                DiagnosticLog.shared.info("Actions mode for wid=\(selectedWindowId!)")
             } else {
-                moveSelection(by: -1) // ↑ = up
+                moveSelectionVertical(1) // select first window
             }
             return true
 
-        case 125, 40: // ↓ or k (keyCode 40 = k, 125 = down arrow)
-            // k should go up, down arrow goes down
-            if keyCode == 40 {
-                moveSelection(by: -1) // k = up
-            } else {
-                moveSelection(by: 1)  // ↓ = down
-            }
+        default:
+            return true
+        }
+    }
+
+    // MARK: Actions — quick keys on the selected window
+
+    private func handleActionsKey(_ keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case 53, 123: // Escape or ← → back to browsing
+            desktopMode = .browsing
             return true
 
-        case 36, 3: // Return (36) or f (3) → focus selected window
+        case 36, 3: // Enter or f → focus
             focusSelectedWindow()
             return true
 
-        case 17: // t → enter tiling sub-mode
-            if selectedWindowId != nil {
-                desktopMode = .tiling
-            }
+        case 17: // t → tiling sub-mode
+            desktopMode = .tiling
             return true
 
-        case 4: // h → highlight selected window
+        case 4: // h → highlight
             highlightSelectedWindow()
             return true
 
         default:
-            return true // consume all keys in desktop inventory
+            return true
         }
     }
 
+    // MARK: Tiling — position keys
+
     private func handleTilingKey(_ keyCode: UInt16) -> Bool {
         switch keyCode {
-        case 53: // Escape → back to browsing
-            desktopMode = .browsing
+        case 53: // Escape → back to actions
+            desktopMode = .actions
             return true
 
-        case 123: // ← → tile left
-            tileSelectedWindow(to: .left)
-            return true
-
-        case 124: // → → tile right
-            tileSelectedWindow(to: .right)
-            return true
-
-        case 126: // ↑ → maximize
-            tileSelectedWindow(to: .maximize)
-            return true
-
-        case 18: // 1 → top-left
-            tileSelectedWindow(to: .topLeft)
-            return true
-
-        case 19: // 2 → top-right
-            tileSelectedWindow(to: .topRight)
-            return true
-
-        case 20: // 3 → bottom-left
-            tileSelectedWindow(to: .bottomLeft)
-            return true
-
-        case 21: // 4 → bottom-right
-            tileSelectedWindow(to: .bottomRight)
-            return true
-
-        case 8: // c → center
-            tileSelectedWindow(to: .center)
-            return true
+        case 123: tileSelectedWindow(to: .left); return true       // ←
+        case 124: tileSelectedWindow(to: .right); return true      // →
+        case 126: tileSelectedWindow(to: .maximize); return true   // ↑
+        case 18:  tileSelectedWindow(to: .topLeft); return true    // 1
+        case 19:  tileSelectedWindow(to: .topRight); return true   // 2
+        case 20:  tileSelectedWindow(to: .bottomLeft); return true // 3
+        case 21:  tileSelectedWindow(to: .bottomRight); return true// 4
+        case 8:   tileSelectedWindow(to: .center); return true     // c
 
         default:
-            return true // consume all keys
+            return true
         }
     }
 
     // MARK: - Selection Actions
 
-    private func moveSelection(by delta: Int) {
-        let windows = flatWindowList
-        guard !windows.isEmpty else { return }
+    /// Move selection up/down within the flat window list (stays in same display column when possible)
+    private func moveSelectionVertical(_ delta: Int) {
+        guard let snapshot = desktopSnapshot else { return }
 
+        // If we have a current selection, navigate within the same display
         if let currentId = selectedWindowId,
-           let currentIdx = windows.firstIndex(where: { $0.id == currentId }) {
-            let newIdx = max(0, min(windows.count - 1, currentIdx + delta))
-            selectedWindowId = windows[newIdx].id
+           let displayIdx = displayIndex(for: currentId, in: snapshot) {
+            let displayWindows = windowsInDisplay(displayIdx, snapshot: snapshot)
+            if let localIdx = displayWindows.firstIndex(where: { $0.id == currentId }) {
+                let newIdx = max(0, min(displayWindows.count - 1, localIdx + delta))
+                selectedWindowId = displayWindows[newIdx].id
+            }
         } else {
+            // No selection — pick first window in first display
+            let windows = flatWindowList
+            guard !windows.isEmpty else { return }
             selectedWindowId = delta > 0 ? windows.first?.id : windows.last?.id
         }
 
-        if let wid = selectedWindowId, let win = windows.first(where: { $0.id == wid }) {
+        if let wid = selectedWindowId, let win = flatWindowList.first(where: { $0.id == wid }) {
             let title = win.title.isEmpty ? "(untitled)" : String(win.title.prefix(30))
             DiagnosticLog.shared.info("Select: wid=\(wid) \"\(title)\"")
         }
+    }
+
+    /// Jump selection to the adjacent display column
+    private func moveSelectionToDisplay(delta: Int) {
+        guard let snapshot = desktopSnapshot, snapshot.displays.count > 1 else { return }
+
+        let displayCount = snapshot.displays.count
+
+        // Find current display index
+        let currentDisplayIdx: Int
+        if let wid = selectedWindowId, let idx = displayIndex(for: wid, in: snapshot) {
+            currentDisplayIdx = idx
+        } else {
+            // No selection — start from first or last display
+            currentDisplayIdx = delta > 0 ? -1 : displayCount
+        }
+
+        let targetIdx = currentDisplayIdx + delta
+        guard targetIdx >= 0, targetIdx < displayCount else { return }
+
+        // Find the position in the current display for context
+        let targetWindows = windowsInDisplay(targetIdx, snapshot: snapshot)
+        guard !targetWindows.isEmpty else { return }
+
+        // Try to land at a similar position (same row index)
+        if let wid = selectedWindowId,
+           let srcIdx = displayIndex(for: wid, in: snapshot) {
+            let srcWindows = windowsInDisplay(srcIdx, snapshot: snapshot)
+            let srcPos = srcWindows.firstIndex(where: { $0.id == wid }) ?? 0
+            let targetPos = min(srcPos, targetWindows.count - 1)
+            selectedWindowId = targetWindows[targetPos].id
+        } else {
+            selectedWindowId = targetWindows.first?.id
+        }
+
+        DiagnosticLog.shared.info("Jump to display \(targetIdx + 1)")
+    }
+
+    // MARK: - Display Helpers
+
+    /// Get the display index for a given window ID
+    private func displayIndex(for wid: UInt32, in snapshot: DesktopInventorySnapshot) -> Int? {
+        for (dIdx, display) in snapshot.displays.enumerated() {
+            for space in display.spaces {
+                for app in space.apps {
+                    if app.windows.contains(where: { $0.id == wid }) {
+                        return dIdx
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Get all windows in a display as a flat list (preserving space/app order)
+    private func windowsInDisplay(_ displayIdx: Int, snapshot: DesktopInventorySnapshot) -> [DesktopInventorySnapshot.InventoryWindowInfo] {
+        guard displayIdx < snapshot.displays.count else { return [] }
+        return snapshot.displays[displayIdx].spaces.flatMap { $0.apps.flatMap { $0.windows } }
     }
 
     private func focusSelectedWindow() {
@@ -284,6 +354,44 @@ final class CommandModeState: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.desktopSnapshot = self?.buildDesktopInventory()
         }
+    }
+
+    /// Copy a text representation of the desktop inventory to clipboard
+    func copyInventoryToClipboard() {
+        guard let snapshot = desktopSnapshot else { return }
+        var lines: [String] = ["DESKTOP INVENTORY"]
+        lines.append(String(repeating: "─", count: 60))
+
+        for display in snapshot.displays {
+            lines.append("")
+            lines.append("\(display.name)  \(display.visibleFrame.w)×\(display.visibleFrame.h)  (\(display.spaceCount) spaces)")
+            for space in display.spaces {
+                let tag = space.isCurrent ? " ◀ active" : ""
+                let winCount = space.apps.reduce(0) { $0 + $1.windows.count }
+                lines.append("  Space \(space.index)\(tag)  (\(winCount) windows)")
+                for app in space.apps {
+                    if app.windows.count == 1, let win = app.windows.first {
+                        let tile = win.tilePosition?.label ?? "—"
+                        let title = win.title.isEmpty ? "(untitled)" : win.title
+                        let dmx = win.isDevmux ? " [devmux]" : ""
+                        lines.append("    \(app.appName)  \(title)\(dmx)  \(Int(win.frame.w))×\(Int(win.frame.h))  \(tile)")
+                    } else {
+                        lines.append("    \(app.appName)")
+                        for win in app.windows {
+                            let tile = win.tilePosition?.label ?? "—"
+                            let title = win.title.isEmpty ? "(untitled)" : win.title
+                            let dmx = win.isDevmux ? " [devmux]" : ""
+                            lines.append("      \(title)\(dmx)  \(Int(win.frame.w))×\(Int(win.frame.h))  \(tile)")
+                        }
+                    }
+                }
+            }
+        }
+
+        let text = lines.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        DiagnosticLog.shared.success("Copied inventory to clipboard (\(text.count) chars)")
     }
 
     func dismiss() {
