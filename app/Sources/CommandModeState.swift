@@ -93,12 +93,18 @@ final class CommandModeState: ObservableObject {
                 return true
             } else if phase == .inventory {
                 // Enter desktop inventory
+                let diag = DiagnosticLog.shared
                 desktopSnapshot = buildDesktopInventory()
                 selectedWindowId = nil
                 desktopMode = .browsing
                 phase = .desktopInventory
                 let size = desktopPanelSize
                 onPanelResize?(size.0, size.1)
+                if let snap = desktopSnapshot {
+                    let totalWindows = snap.allWindows.count
+                    let totalSpaces = snap.displays.reduce(0) { $0 + $1.spaces.count }
+                    diag.info("Desktop inventory: \(snap.displays.count) display(s), \(totalSpaces) space(s), \(totalWindows) window(s)")
+                }
                 return true
             }
         }
@@ -240,8 +246,12 @@ final class CommandModeState: ObservableObject {
             let newIdx = max(0, min(windows.count - 1, currentIdx + delta))
             selectedWindowId = windows[newIdx].id
         } else {
-            // No selection yet — select first or last depending on direction
             selectedWindowId = delta > 0 ? windows.first?.id : windows.last?.id
+        }
+
+        if let wid = selectedWindowId, let win = windows.first(where: { $0.id == wid }) {
+            let title = win.title.isEmpty ? "(untitled)" : String(win.title.prefix(30))
+            DiagnosticLog.shared.info("Select: wid=\(wid) \"\(title)\"")
         }
     }
 
@@ -249,6 +259,7 @@ final class CommandModeState: ObservableObject {
         guard let wid = selectedWindowId,
               let window = flatWindowList.first(where: { $0.id == wid }) else { return }
 
+        DiagnosticLog.shared.info("Focus: wid=\(wid) pid=\(window.pid)")
         let pid = window.pid
         dismiss()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -258,6 +269,7 @@ final class CommandModeState: ObservableObject {
 
     private func highlightSelectedWindow() {
         guard let wid = selectedWindowId else { return }
+        DiagnosticLog.shared.info("Highlight: wid=\(wid)")
         WindowTiler.highlightWindowById(wid: wid)
     }
 
@@ -265,10 +277,10 @@ final class CommandModeState: ObservableObject {
         guard let wid = selectedWindowId,
               let window = flatWindowList.first(where: { $0.id == wid }) else { return }
 
+        DiagnosticLog.shared.info("Tile: wid=\(wid) → \(position.rawValue)")
         WindowTiler.tileWindowById(wid: wid, pid: window.pid, to: position)
         desktopMode = .browsing
 
-        // Refresh the snapshot to reflect new position
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.desktopSnapshot = self?.buildDesktopInventory()
         }
@@ -413,6 +425,7 @@ final class CommandModeState: ObservableObject {
         let blockedSuffixes = ["UIService", "UIHelper", "Agent", "Helper", "ViewService"]
 
         let ownPid = ProcessInfo.processInfo.processIdentifier
+        let rawCount = rawList.count
 
         var allWindows: [RawWindow] = []
         for info in rawList {
@@ -461,6 +474,8 @@ final class CommandModeState: ObservableObject {
             allWindows.append(RawWindow(wid: wid, app: ownerName, pid: pid, title: title,
                                         frame: frame, devmuxSession: devmuxSession, spaceIds: spaceIds))
         }
+
+        DiagnosticLog.shared.info("Desktop scan: \(rawCount) raw → \(allWindows.count) after filter")
 
         // Assign each window to (display, space)
         struct AssignedWindow {
