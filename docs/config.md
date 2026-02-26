@@ -133,6 +133,9 @@ Run `devmux init` in your project directory to generate a starter
 | `devmux sync`              | Reconcile session to match declared config        |
 | `devmux restart [pane]`    | Restart a pane's process (by name or index)       |
 | `devmux tile <position>`   | Tile the frontmost window to a screen position    |
+| `devmux group [id]`        | List tab groups or launch/attach a group          |
+| `devmux groups`            | List all tab groups with status                   |
+| `devmux tab <group> [tab]` | Switch tab within a group (by label or index)     |
 | `devmux app`               | Launch the menu bar companion app                 |
 | `devmux app build`         | Rebuild the menu bar app from source              |
 | `devmux app restart`       | Rebuild and relaunch the menu bar app             |

@@ -1,10 +1,106 @@
 ---
-title: Workspace Layers
-description: Group projects into switchable layers for context switching
+title: Workspace Layers & Tab Groups
+description: Group projects into switchable layers and tabbed groups
 order: 4
 ---
 
-# Workspace Layers
+# Workspace Layers & Tab Groups
+
+Two ways to organize related projects in `~/.devmux/workspace.json`:
+
+- **Layers** — switchable contexts that focus and tile windows
+- **Tab groups** — related projects as tabs within a single terminal window
+
+Both features are configured in the same workspace config and
+work together.
+
+## Tab Groups
+
+Tab groups let you bundle related projects as tabs (tmux windows)
+within a single tmux session. This is useful when you have a family
+of projects — like an iOS app, macOS app, website, and API — that
+you think of as one logical unit.
+
+### Configuration
+
+Add `groups` to `~/.devmux/workspace.json`:
+
+```json
+{
+  "name": "my-setup",
+  "groups": [
+    {
+      "id": "talkie",
+      "label": "Talkie",
+      "tabs": [
+        { "path": "/Users/you/dev/talkie-ios", "label": "iOS" },
+        { "path": "/Users/you/dev/talkie-macos", "label": "macOS" },
+        { "path": "/Users/you/dev/talkie-web", "label": "Website" },
+        { "path": "/Users/you/dev/talkie-api", "label": "API" }
+      ]
+    }
+  ]
+}
+```
+
+Each tab's pane layout comes from its own `.devmux.json` — no changes
+to per-project configs.
+
+### How it works
+
+- **Session naming**: `devmux-group-<id>` (e.g. `devmux-group-talkie`)
+- **tmux mapping**: 1 group = 1 tmux session, each tab = 1 tmux window,
+  each window has its own panes from that project's `.devmux.json`
+- **Independent launch still works**: `cd talkie-ios && devmux` creates
+  its own standalone session as before
+
+### Tab group fields
+
+| Field          | Type     | Description                          |
+|----------------|----------|--------------------------------------|
+| `id`           | string   | Unique identifier for the group      |
+| `label`        | string   | Display name shown in the UI         |
+| `tabs`         | array    | List of tab definitions              |
+| `tabs[].path`  | string   | Absolute path to project directory   |
+| `tabs[].label` | string?  | Tab name (defaults to directory name) |
+
+### CLI commands
+
+```bash
+devmux groups             # List all groups with status
+devmux group <id>         # Launch or attach to a group
+devmux tab <group> [tab]  # Switch tab by label or index
+```
+
+Examples:
+
+```bash
+devmux group talkie       # Launch all Talkie tabs
+devmux tab talkie iOS     # Switch to the iOS tab
+devmux tab talkie 0       # Switch to first tab (by index)
+```
+
+### Menu bar app
+
+Tab groups appear above the project list in the menu bar panel.
+Each group row shows:
+
+- Status indicator (running/stopped)
+- Tab count badge
+- Expand/collapse to see individual tabs
+- Launch/Attach and Kill buttons
+- Per-tab "Go" buttons to switch and focus a specific tab
+
+The command palette also includes group commands:
+
+| Command                    | Description                            |
+|----------------------------|----------------------------------------|
+| Launch *group*             | Start the group session                |
+| Attach *group*             | Focus the running group session        |
+| *Group*: *Tab*             | Switch to a specific tab in a group    |
+| Kill *group* Group         | Terminate the group session            |
+
+## Layers
 
 Layers let you group projects into switchable contexts. Instead of
 juggling six terminal windows at once, define two or three layers and
@@ -15,9 +111,9 @@ behind.
 All tmux sessions stay alive across switches. Nothing is detached or
 killed — layers only control which windows are focused.
 
-## Configuration
+### Configuration
 
-Create `~/.devmux/workspace.json`:
+Add `layers` to `~/.devmux/workspace.json`:
 
 ```json
 {
@@ -43,7 +139,42 @@ Create `~/.devmux/workspace.json`:
 }
 ```
 
-### Fields
+### Using groups in layers
+
+Layer projects can reference a tab group instead of a single path.
+This lets you tile a whole group into a screen position:
+
+```json
+{
+  "name": "my-setup",
+  "groups": [
+    {
+      "id": "talkie",
+      "label": "Talkie",
+      "tabs": [
+        { "path": "/Users/you/dev/talkie-ios", "label": "iOS" },
+        { "path": "/Users/you/dev/talkie-web", "label": "Website" }
+      ]
+    }
+  ],
+  "layers": [
+    {
+      "id": "main",
+      "label": "Main",
+      "projects": [
+        { "group": "talkie", "tile": "top-left" },
+        { "path": "/Users/you/dev/design-system", "tile": "right" }
+      ]
+    }
+  ]
+}
+```
+
+When switching to this layer, devmux launches (or focuses) the
+"talkie" group session and tiles it to the top-left quarter, alongside
+the design-system project on the right.
+
+### Layer fields
 
 | Field             | Type     | Description                              |
 |-------------------|----------|------------------------------------------|
@@ -52,8 +183,11 @@ Create `~/.devmux/workspace.json`:
 | `layers[].id`     | string   | Unique identifier (e.g. `"web"`)         |
 | `layers[].label`  | string   | Display name shown in the UI             |
 | `layers[].projects` | array  | Projects in this layer                   |
-| `projects[].path` | string   | Absolute path to project directory       |
+| `projects[].path` | string?  | Absolute path to project directory       |
+| `projects[].group`| string?  | Group ID (alternative to `path`)         |
 | `projects[].tile` | string?  | Tile position (optional, see below)      |
+
+Each project entry must have either `path` or `group`, not both.
 
 ### Tile values
 
@@ -61,7 +195,7 @@ Any tile position from the [config reference](/docs/config#tile-positions)
 works: `left`, `right`, `top-left`, `top-right`, `bottom-left`,
 `bottom-right`, `maximize`, `center`.
 
-## Switching layers
+### Switching layers
 
 Three ways to switch:
 
@@ -80,7 +214,7 @@ When you switch to a layer:
 
 The app remembers which layer was last active across restarts.
 
-## Layer bar
+### Layer bar
 
 When a workspace config is loaded, a layer bar appears between the
 header and search field in the menu bar panel:
@@ -123,14 +257,13 @@ No `tile` — just focuses the window wherever it is.
 }
 ```
 
-### Three-project layout
+### Group + project
 
 ```json
 {
   "projects": [
-    { "path": "/Users/you/dev/main", "tile": "left" },
-    { "path": "/Users/you/dev/web", "tile": "top-right" },
-    { "path": "/Users/you/dev/server", "tile": "bottom-right" }
+    { "group": "talkie", "tile": "left" },
+    { "path": "/Users/you/dev/api", "tile": "right" }
   ]
 }
 ```
@@ -158,3 +291,6 @@ No `tile` — just focuses the window wherever it is.
   the Refresh Projects button or restart the app to pick up changes.
 - The `tile` field is optional. Omit it if you just want the window
   focused without repositioning.
+- Tab groups and standalone projects can coexist in the same workspace.
+  Use groups for related project families, standalone paths for
+  individual projects.

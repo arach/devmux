@@ -40,8 +40,315 @@ struct Chord {
 
 enum DesktopInventoryMode: Equatable {
     case browsing
-    case actions   // Enter on selection → action picker
-    case tiling    // t from actions → tile picker
+    case tiling       // t → tile picker
+    case gridPreview  // s → preview grid layout before applying
+    case screenMap    // m → interactive screen map editor
+}
+
+// MARK: - Screen Map Editor
+
+struct ScreenMapWindow: Identifiable {
+    let id: UInt32              // CGWindowID
+    let pid: Int32              // for AX API
+    let app: String
+    let title: String
+    let originalFrame: CGRect   // frozen at snapshot time
+    var editedFrame: CGRect     // mutated during drag
+    let zIndex: Int             // 0 = frontmost
+    var layer: Int              // assigned by iterative peeling
+    var hasEdits: Bool { originalFrame != editedFrame }
+}
+
+final class ScreenMapEditorState: ObservableObject {
+    @Published var windows: [ScreenMapWindow]
+    @Published var selectedLayers: Set<Int> = [0]  // empty = show all
+    @Published var draggingWindowId: UInt32? = nil
+    @Published var isPreviewing: Bool = false
+
+    /// Backward-compat: single active layer when exactly one is selected
+    var activeLayer: Int? {
+        selectedLayers.count == 1 ? selectedLayers.first : nil
+    }
+
+    func isLayerSelected(_ layer: Int) -> Bool {
+        selectedLayers.isEmpty || selectedLayers.contains(layer)
+    }
+
+    var isShowingAll: Bool { selectedLayers.isEmpty }
+    var dragStartFrame: CGRect? = nil
+
+    // Cached geometry for coordinate conversion (set by the view)
+    var scale: CGFloat = 1
+    var mapOrigin: CGPoint = .zero
+    var screenSize: CGSize = .zero
+
+    init(windows: [ScreenMapWindow]) {
+        self.windows = windows
+    }
+
+    /// Number of distinct layers
+    var layerCount: Int {
+        (windows.map(\.layer).max() ?? 0) + 1
+    }
+
+    /// Window count for a specific layer (for sidebar badges)
+    func windowCount(for layer: Int) -> Int {
+        windows.filter { $0.layer == layer }.count
+    }
+
+    /// Windows visible for the active layer filter
+    var visibleWindows: [ScreenMapWindow] {
+        guard !selectedLayers.isEmpty else { return windows }
+        return windows.filter { selectedLayers.contains($0.layer) }
+    }
+
+    /// Number of windows with pending edits (position or size)
+    var pendingEditCount: Int {
+        windows.filter(\.hasEdits).count
+    }
+
+    /// Cycle layer: 0 → 1 → … → N-1 → empty(all) → 0
+    /// From multi-select → collapse to [0] and resume cycling
+    func cycleLayer() {
+        if selectedLayers.count > 1 {
+            // Multi-select → collapse to single
+            selectedLayers = [0]
+            return
+        }
+        guard let current = activeLayer else {
+            // Showing all → go to 0
+            selectedLayers = [0]
+            return
+        }
+        let next = current + 1
+        if next >= layerCount {
+            selectedLayers = []  // all
+        } else {
+            selectedLayers = [next]
+        }
+    }
+
+    /// Direct layer selection (from sidebar clicks)
+    func selectLayer(_ layer: Int?) {
+        DiagnosticLog.shared.info("[ScreenMap] selectLayer: \(layer.map { "\($0)" } ?? "all")")
+        if let layer {
+            selectedLayers = [layer]
+        } else {
+            selectedLayers = []
+        }
+    }
+
+    /// Toggle a layer in multi-select (Cmd+click).
+    /// If all layers end up selected, collapse to empty (show all).
+    func toggleLayerSelection(_ layer: Int) {
+        if selectedLayers.contains(layer) {
+            selectedLayers.remove(layer)
+        } else {
+            selectedLayers.insert(layer)
+        }
+        // If all layers are now selected, collapse to "All"
+        if selectedLayers.count >= layerCount {
+            selectedLayers = []
+        }
+        DiagnosticLog.shared.info("[ScreenMap] toggleLayer \(layer) → \(selectedLayers.sorted())")
+    }
+
+    /// Move a window to a different layer, optionally auto-fitting to avoid collisions
+    func reassignLayer(windowId: UInt32, toLayer: Int, fitToAvailable: Bool) {
+        guard let idx = windows.firstIndex(where: { $0.id == windowId }) else { return }
+        let oldFrame = windows[idx].editedFrame
+        windows[idx].layer = toLayer
+        if fitToAvailable {
+            fitWindowIntoLayer(at: idx)
+        }
+        let newFrame = windows[idx].editedFrame
+        if oldFrame != newFrame {
+            DiagnosticLog.shared.info("[ScreenMap] reassign wid=\(windowId): fitted \(Int(oldFrame.origin.x)),\(Int(oldFrame.origin.y)) → \(Int(newFrame.origin.x)),\(Int(newFrame.origin.y))")
+        }
+    }
+
+    /// Auto-resize a window to fit among siblings in its layer
+    func fitWindowIntoLayer(at idx: Int) {
+        let win = windows[idx]
+        let siblings = windows.enumerated().filter { $0.offset != idx && $0.element.layer == win.layer }
+        let siblingFrames = siblings.map(\.element.editedFrame)
+        let screenRect = CGRect(origin: .zero, size: screenSize)
+        if let fitted = fitRect(win.editedFrame, avoiding: siblingFrames, within: screenRect) {
+            windows[idx].editedFrame = fitted
+        }
+    }
+
+    /// Try to fit a rect avoiding collisions; returns nil if no adjustment needed or no fit found
+    func fitRect(_ rect: CGRect, avoiding others: [CGRect], within bounds: CGRect) -> CGRect? {
+        // No collisions → keep as-is
+        let collisions = others.filter { $0.intersects(rect) }
+        if collisions.isEmpty { return nil }
+
+        let minW: CGFloat = 100, minH: CGFloat = 50
+        var candidates: [CGRect] = []
+
+        for blocker in collisions {
+            // Shrink from right (keep left edge, reduce width)
+            let rightClip = CGRect(x: rect.minX, y: rect.minY,
+                                   width: blocker.minX - rect.minX, height: rect.height)
+            if rightClip.width >= minW && rightClip.height >= minH { candidates.append(rightClip) }
+
+            // Shrink from bottom (keep top edge, reduce height)
+            let bottomClip = CGRect(x: rect.minX, y: rect.minY,
+                                    width: rect.width, height: blocker.minY - rect.minY)
+            if bottomClip.width >= minW && bottomClip.height >= minH { candidates.append(bottomClip) }
+
+            // Push right (shift origin past blocker)
+            let pushRight = CGRect(x: blocker.maxX, y: rect.minY,
+                                   width: rect.width, height: rect.height)
+            if pushRight.maxX <= bounds.maxX { candidates.append(pushRight) }
+
+            // Push down (shift origin below blocker)
+            let pushDown = CGRect(x: rect.minX, y: blocker.maxY,
+                                  width: rect.width, height: rect.height)
+            if pushDown.maxY <= bounds.maxY { candidates.append(pushDown) }
+        }
+
+        // Pick largest candidate that avoids all siblings
+        let valid = candidates.filter { cand in
+            cand.width >= minW && cand.height >= minH &&
+            bounds.contains(cand) &&
+            !others.contains(where: { $0.intersects(cand) })
+        }
+        return valid.max(by: { $0.width * $0.height < $1.width * $1.height })
+    }
+
+    /// Reset all edited frames back to original
+    func discardEdits() {
+        for i in windows.indices {
+            windows[i].editedFrame = windows[i].originalFrame
+        }
+    }
+
+    /// Remap sparse layer numbers (e.g. 0, 3, 5) to contiguous (0, 1, 2)
+    func renumberLayersContiguous() {
+        let usedLayers = Set(windows.map(\.layer)).sorted()
+        guard usedLayers != Array(0..<usedLayers.count) else { return }
+        let mapping = Dictionary(uniqueKeysWithValues: usedLayers.enumerated().map { ($1, $0) })
+        for i in windows.indices {
+            windows[i].layer = mapping[windows[i].layer] ?? windows[i].layer
+        }
+    }
+
+    /// Consolidate windows into fewer layers (defragmentation).
+    /// Returns (oldLayerCount, newLayerCount) for display.
+    func consolidateLayers() -> (old: Int, new: Int) {
+        let oldCount = layerCount
+        let maxLayer = (windows.map(\.layer).max() ?? 0)
+        guard maxLayer >= 1 else { return (oldCount, oldCount) }
+
+        let screenRect = CGRect(origin: .zero, size: screenSize)
+
+        // Process from deepest layer up to layer 1
+        for sourceLayer in stride(from: maxLayer, through: 1, by: -1) {
+            let windowIndices = windows.indices.filter { windows[$0].layer == sourceLayer }
+            for idx in windowIndices {
+                let win = windows[idx]
+                var placed = false
+
+                // Try each shallower target layer
+                for targetLayer in 0..<sourceLayer {
+                    let siblings = windows.enumerated().filter {
+                        $0.offset != idx && $0.element.layer == targetLayer
+                    }.map(\.element.editedFrame)
+
+                    // Prefer keeping current position if no collision
+                    let collisions = siblings.filter { $0.intersects(win.editedFrame) }
+                    if collisions.isEmpty {
+                        windows[idx].layer = targetLayer
+                        placed = true
+                        break
+                    }
+
+                    // Fall back to fitRect for an adjusted position
+                    if let fitted = fitRect(win.editedFrame, avoiding: siblings, within: screenRect) {
+                        windows[idx].editedFrame = fitted
+                        windows[idx].layer = targetLayer
+                        placed = true
+                        break
+                    }
+                }
+                // If nothing works, leave it on its current layer
+                _ = placed
+            }
+        }
+
+        renumberLayersContiguous()
+
+        // Clamp selectedLayers if any went out of range
+        selectedLayers = selectedLayers.filter { $0 < layerCount }
+
+        return (old: oldCount, new: layerCount)
+    }
+
+    var layerLabel: String {
+        if selectedLayers.isEmpty { return "ALL" }
+        if selectedLayers.count == 1 { return "LAYER \(selectedLayers.first!)" }
+        return selectedLayers.sorted().map { "L\($0)" }.joined(separator: "+")
+    }
+
+    /// Merge all windows from selected layers into the lowest one.
+    /// Returns (count of moved windows, target layer) or nil if not enough layers selected.
+    func flattenSelectedLayers() -> (count: Int, target: Int)? {
+        guard selectedLayers.count >= 2 else { return nil }
+        let sorted = selectedLayers.sorted()
+        let target = sorted[0]
+        let higherLayers = Set(sorted.dropFirst())
+
+        var moveCount = 0
+        for idx in windows.indices where higherLayers.contains(windows[idx].layer) {
+            windows[idx].layer = target
+            fitWindowIntoLayer(at: idx)
+            moveCount += 1
+        }
+
+        renumberLayersContiguous()
+        selectedLayers = target < layerCount ? [target] : []
+
+        return (count: moveCount, target: target)
+    }
+}
+
+// MARK: - Filter Presets
+
+enum FilterPreset: String, CaseIterable {
+    case all = "All"
+    case terminals = "Terminals"
+    case editors = "Editors"
+    case browsers = "Browsers"
+    case devmux = "DevMux"
+    case currentSpace = "Current Space"
+
+    var appTypes: Set<AppType>? {
+        switch self {
+        case .all: return nil
+        case .terminals: return [.terminal]
+        case .editors: return [.editor]
+        case .browsers: return [.browser]
+        case .devmux: return nil  // special case
+        case .currentSpace: return nil  // special case
+        }
+    }
+
+    var keyIndex: Int? {
+        switch self {
+        case .all: return 1
+        case .terminals: return 2
+        case .editors: return 3
+        case .browsers: return 4
+        case .devmux: return 5
+        case .currentSpace: return 6
+        }
+    }
+
+    static func from(keyIndex: Int) -> FilterPreset? {
+        allCases.first { $0.keyIndex == keyIndex }
+    }
 }
 
 // MARK: - State Machine
@@ -51,11 +358,204 @@ final class CommandModeState: ObservableObject {
     @Published var inventory = CommandModeInventory(activeLayer: nil, layerCount: 0, items: [])
     @Published var chords: [Chord] = []
     @Published var desktopSnapshot: DesktopInventorySnapshot?
-    @Published var selectedWindowId: UInt32?
+    @Published var selectedWindowIds: Set<UInt32> = []
     @Published var desktopMode: DesktopInventoryMode = .browsing
+    @Published var activePreset: FilterPreset? = nil
+    @Published var searchQuery: String = ""
+    @Published var isSearching: Bool = false
+
+    // MARK: - Screen Map Editor
+    @Published var screenMapEditor: ScreenMapEditorState? = nil
+
+    // MARK: - Marquee Drag State
+    @Published var isDragging: Bool = false
+    @Published var marqueeOrigin: CGPoint = .zero
+    @Published var marqueeCurrentPoint: CGPoint = .zero
+
+    /// Computed normalized rect from origin → current drag point
+    var marqueeRect: CGRect {
+        let x = min(marqueeOrigin.x, marqueeCurrentPoint.x)
+        let y = min(marqueeOrigin.y, marqueeCurrentPoint.y)
+        let w = abs(marqueeCurrentPoint.x - marqueeOrigin.x)
+        let h = abs(marqueeCurrentPoint.y - marqueeOrigin.y)
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// Row frames in inventoryPanel coordinate space (updated by PreferenceKey)
+    var rowFrames: [UInt32: CGRect] = [:]
+
+    /// Raw mouse-down point for drag threshold detection (screen coordinates)
+    var dragStartPoint: NSPoint?
+
+    /// Selection state before drag started (for Cmd+drag additive mode)
+    private var preDragSelection: Set<UInt32> = []
+
+    // MARK: - Saved Positions (for restore after show & distribute)
+    /// Saved window frames before a show/distribute action — allows undo
+    @Published var savedPositions: [UInt32: (pid: Int32, frame: WindowFrame)]? = nil
+
+    /// Brief flash message shown after an action (auto-dismisses)
+    @Published var flashMessage: String? = nil
 
     var onDismiss: (() -> Void)?
     var onPanelResize: ((_ width: CGFloat, _ height: CGFloat) -> Void)?
+
+    /// Tracks the last item navigated to, for consistent Shift+arrow multi-select
+    private var cursorWindowId: UInt32?
+
+    // MARK: - Selection Helpers
+
+    /// Backwards-compat: returns single selected ID (first element)
+    var selectedWindowId: UInt32? {
+        selectedWindowIds.first
+    }
+
+    func isSelected(_ id: UInt32) -> Bool {
+        selectedWindowIds.contains(id)
+    }
+
+    func selectSingle(_ id: UInt32) {
+        selectedWindowIds = [id]
+        cursorWindowId = id
+    }
+
+    func toggleSelection(_ id: UInt32) {
+        if selectedWindowIds.contains(id) {
+            selectedWindowIds.remove(id)
+        } else {
+            selectedWindowIds.insert(id)
+        }
+        cursorWindowId = id
+    }
+
+    func clearSelection() {
+        selectedWindowIds = []
+        cursorWindowId = nil
+        isDragging = false
+        dragStartPoint = nil
+    }
+
+    /// Select contiguous range from cursor anchor to target (Shift+click)
+    func selectRange(to targetId: UInt32) {
+        guard let anchorId = cursorWindowId else { selectSingle(targetId); return }
+        let list = flatWindowList
+        guard let anchorIdx = list.firstIndex(where: { $0.id == anchorId }),
+              let targetIdx = list.firstIndex(where: { $0.id == targetId }) else {
+            selectSingle(targetId)
+            return
+        }
+        let lo = min(anchorIdx, targetIdx)
+        let hi = max(anchorIdx, targetIdx)
+        selectedWindowIds = Set(list[lo...hi].map(\.id))
+        // cursorWindowId stays as anchor for subsequent Shift+clicks
+    }
+
+    // MARK: - Marquee Drag
+
+    func beginDrag(at point: CGPoint, additive: Bool) {
+        preDragSelection = additive ? selectedWindowIds : []
+        marqueeOrigin = point
+        marqueeCurrentPoint = point
+        isDragging = true
+    }
+
+    func updateDrag(to point: CGPoint) {
+        marqueeCurrentPoint = point
+        updateMarqueeSelection()
+    }
+
+    func endDrag() {
+        isDragging = false
+        dragStartPoint = nil
+        preDragSelection = []
+    }
+
+    /// Select all rows whose frames intersect the current marquee rect
+    private func updateMarqueeSelection() {
+        let rect = marqueeRect
+        var hits = preDragSelection
+        for (wid, frame) in rowFrames {
+            if rect.intersects(frame) {
+                hits.insert(wid)
+            }
+        }
+        selectedWindowIds = hits
+        if let first = hits.first { cursorWindowId = first }
+    }
+
+    func activateSearch() {
+        isSearching = true
+        searchQuery = ""
+        clearSelection()
+    }
+
+    func deactivateSearch() {
+        isSearching = false
+        searchQuery = ""
+    }
+
+    /// Filtered desktop snapshot based on active preset and search query
+    var filteredSnapshot: DesktopInventorySnapshot? {
+        guard let snapshot = desktopSnapshot else { return nil }
+
+        let needsPresetFilter = activePreset != nil && activePreset != .all
+        let needsSearchFilter = isSearching && !searchQuery.isEmpty
+        guard needsPresetFilter || needsSearchFilter else { return snapshot }
+
+        let query = searchQuery.lowercased()
+
+        let filteredDisplays = snapshot.displays.compactMap { display -> DesktopInventorySnapshot.DisplayInfo? in
+            let filteredSpaces = display.spaces.compactMap { space -> DesktopInventorySnapshot.SpaceGroup? in
+                if let preset = activePreset, preset == .currentSpace && !space.isCurrent { return nil }
+
+                let filteredApps = space.apps.compactMap { appGroup -> DesktopInventorySnapshot.AppGroup? in
+                    let filteredWindows = appGroup.windows.filter { win in
+                        // Preset filter
+                        if let preset = activePreset, preset != .all {
+                            let passesPreset: Bool
+                            switch preset {
+                            case .devmux: passesPreset = win.isDevmux
+                            case .currentSpace: passesPreset = true
+                            default:
+                                if let types = preset.appTypes, let name = win.appName {
+                                    passesPreset = types.contains(AppTypeClassifier.classify(name))
+                                } else {
+                                    passesPreset = false
+                                }
+                            }
+                            if !passesPreset { return false }
+                        }
+
+                        // Search filter
+                        if needsSearchFilter {
+                            let matchesApp = win.appName?.lowercased().contains(query) ?? false
+                            let matchesTitle = win.title.lowercased().contains(query)
+                            let matchesDevmux = win.devmuxSession?.lowercased().contains(query) ?? false
+                            if !matchesApp && !matchesTitle && !matchesDevmux { return false }
+                        }
+
+                        return true
+                    }
+                    guard !filteredWindows.isEmpty else { return nil }
+                    return DesktopInventorySnapshot.AppGroup(
+                        id: appGroup.id, appName: appGroup.appName, windows: filteredWindows
+                    )
+                }
+                guard !filteredApps.isEmpty else { return nil }
+                return DesktopInventorySnapshot.SpaceGroup(
+                    id: space.id, index: space.index, isCurrent: space.isCurrent, apps: filteredApps
+                )
+            }
+            guard !filteredSpaces.isEmpty else { return nil }
+            return DesktopInventorySnapshot.DisplayInfo(
+                id: display.id, name: display.name, resolution: display.resolution,
+                visibleFrame: display.visibleFrame, isMain: display.isMain,
+                spaceCount: display.spaceCount, currentSpaceIndex: display.currentSpaceIndex,
+                spaces: filteredSpaces
+            )
+        }
+        return DesktopInventorySnapshot(displays: filteredDisplays, timestamp: snapshot.timestamp)
+    }
 
     /// Compact panel size for chord view
     private let chordPanelSize: (CGFloat, CGFloat) = (580, 360)
@@ -70,25 +570,36 @@ final class CommandModeState: ObservableObject {
         return (width, height)
     }
 
-    /// Flat window list for keyboard navigation
+    /// Flat window list for keyboard navigation (respects active filter)
     var flatWindowList: [DesktopInventorySnapshot.InventoryWindowInfo] {
-        desktopSnapshot?.allWindows ?? []
+        filteredSnapshot?.allWindows ?? []
     }
 
     func enter() {
         inventory = buildInventory()
         chords = buildChords()
-        phase = .inventory
+        desktopSnapshot = buildDesktopInventory()
+        clearSelection()
+        desktopMode = .browsing
+        phase = .desktopInventory
+        // Go directly to screen map editor
+        enterScreenMapEditor()
+        // Don't call onPanelResize here — caller handles initial sizing
     }
 
     /// Returns true if the key was consumed
-    func handleKey(_ keyCode: UInt16) -> Bool {
+    func handleKey(_ keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         // Backtick (keyCode 50) toggles desktop inventory from either phase
         if keyCode == 50 {
+            if isSearching {
+                deactivateSearch()
+                return true
+            }
             if phase == .desktopInventory {
                 // Back to chord view
-                selectedWindowId = nil
+                clearSelection()
                 desktopMode = .browsing
+                activePreset = nil
                 phase = .inventory
                 onPanelResize?(chordPanelSize.0, chordPanelSize.1)
                 return true
@@ -96,7 +607,7 @@ final class CommandModeState: ObservableObject {
                 // Enter desktop inventory
                 let diag = DiagnosticLog.shared
                 desktopSnapshot = buildDesktopInventory()
-                selectedWindowId = nil
+                clearSelection()
                 desktopMode = .browsing
                 phase = .desktopInventory
                 let size = desktopPanelSize
@@ -112,7 +623,7 @@ final class CommandModeState: ObservableObject {
 
         // Route desktop inventory keys
         if phase == .desktopInventory {
-            return handleDesktopInventoryKey(keyCode)
+            return handleDesktopInventoryKey(keyCode, modifiers: modifiers)
         }
 
         // Escape from chord view → dismiss
@@ -140,35 +651,79 @@ final class CommandModeState: ObservableObject {
 
     // MARK: - Desktop Inventory Key Handling
 
-    private func handleDesktopInventoryKey(_ keyCode: UInt16) -> Bool {
+    private func handleDesktopInventoryKey(_ keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         switch desktopMode {
-        case .browsing: return handleBrowsingKey(keyCode)
-        case .actions:  return handleActionsKey(keyCode)
-        case .tiling:   return handleTilingKey(keyCode)
+        case .browsing:     return handleBrowsingKey(keyCode, modifiers: modifiers)
+        case .tiling:       return handleTilingKey(keyCode)
+        case .gridPreview:  return handleGridPreviewKey(keyCode)
+        case .screenMap:    return handleScreenMapKey(keyCode)
         }
     }
 
     // MARK: Browsing — ↑↓ within column, ←→ between displays, Enter → actions
 
-    private func handleBrowsingKey(_ keyCode: UInt16) -> Bool {
+    private func handleBrowsingKey(_ keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        // Cmd+A → select all visible windows (works during search too — selects filtered results)
+        if keyCode == 0 && modifiers.contains(.command) {
+            let allIds = Set(flatWindowList.map(\.id))
+            if selectedWindowIds == allIds {
+                clearSelection()  // toggle off
+            } else {
+                selectedWindowIds = allIds
+            }
+            if isSearching { deactivateSearch() }
+            return true
+        }
+
         switch keyCode {
         case 53: // Escape
-            if selectedWindowId != nil {
-                selectedWindowId = nil
+            if isSearching {
+                deactivateSearch()
+                return true
+            }
+            if !selectedWindowIds.isEmpty {
+                clearSelection()
                 return true
             }
             // No selection — back to chord view
             desktopMode = .browsing
+            activePreset = nil
             phase = .inventory
             onPanelResize?(chordPanelSize.0, chordPanelSize.1)
             return true
 
-        case 126, 38: // ↑ or j
-            moveSelectionVertical(keyCode == 38 ? 1 : -1)
+        case 126: // ↑
+            if modifiers.contains(.shift) {
+                extendSelectionVertical(-1)
+            } else {
+                moveSelectionVertical(-1)
+            }
             return true
 
-        case 125, 40: // ↓ or k
-            moveSelectionVertical(keyCode == 40 ? -1 : 1)
+        case 125: // ↓
+            if modifiers.contains(.shift) {
+                extendSelectionVertical(1)
+            } else {
+                moveSelectionVertical(1)
+            }
+            return true
+
+        case 38: // j
+            if isSearching { return false }
+            if modifiers.contains(.shift) {
+                extendSelectionVertical(1)
+            } else {
+                moveSelectionVertical(1)
+            }
+            return true
+
+        case 40: // k
+            if isSearching { return false }
+            if modifiers.contains(.shift) {
+                extendSelectionVertical(-1)
+            } else {
+                moveSelectionVertical(-1)
+            }
             return true
 
         case 123: // ← → jump to previous display
@@ -179,41 +734,96 @@ final class CommandModeState: ObservableObject {
             moveSelectionToDisplay(delta: 1)
             return true
 
-        case 36: // Enter → action mode (or select first if nothing selected)
-            if selectedWindowId != nil {
-                desktopMode = .actions
-                DiagnosticLog.shared.info("Actions mode for wid=\(selectedWindowId!)")
+        case 36: // Enter
+            if isSearching {
+                // Select first match and bring to front
+                if let first = flatWindowList.first {
+                    selectSingle(first.id)
+                    bringSelectedToFront()
+                }
+                deactivateSearch()
+                return true
+            }
+            if !selectedWindowIds.isEmpty {
+                if selectedWindowIds.count > 1 {
+                    bringAllSelectedToFront()
+                } else {
+                    bringSelectedToFront()
+                }
             } else {
                 moveSelectionVertical(1) // select first window
             }
             return true
 
+        case 44: // / → activate search
+            if !isSearching {
+                activateSearch()
+                return true
+            }
+            return false
+
+        case 3: // f → focus window directly
+            if isSearching && selectedWindowIds.isEmpty { return false }
+            if isSearching { deactivateSearch() }
+            if !selectedWindowIds.isEmpty {
+                if selectedWindowIds.count > 1 {
+                    focusAllSelected()
+                } else {
+                    focusSelectedWindow()
+                }
+            }
+            return true
+
+        case 17: // t → enter tiling mode directly
+            if isSearching && selectedWindowIds.isEmpty { return false }
+            if isSearching { deactivateSearch() }
+            if !selectedWindowIds.isEmpty {
+                desktopMode = .tiling
+            }
+            return true
+
+        case 1: // s → grid preview (or show & distribute if single)
+            if isSearching && selectedWindowIds.isEmpty { return false }
+            if isSearching { deactivateSearch() }
+            if !selectedWindowIds.isEmpty {
+                desktopMode = .gridPreview
+            }
+            return true
+
+        case 4: // h → highlight window directly
+            if isSearching && selectedWindowIds.isEmpty { return false }
+            if isSearching { deactivateSearch() }
+            if !selectedWindowIds.isEmpty {
+                if selectedWindowIds.count > 1 {
+                    highlightAllSelected()
+                } else {
+                    highlightSelectedWindow()
+                }
+            }
+            return true
+
+        case 46: // m → screen map editor
+            if isSearching { deactivateSearch() }
+            enterScreenMapEditor()
+            return true
+
+        case 18, 19, 20, 21, 23, 22: // 1-6 → filter presets (only when no selection and not searching)
+            if isSearching { return false }
+            if selectedWindowIds.isEmpty {
+                let keyToIndex: [UInt16: Int] = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6]
+                if let idx = keyToIndex[keyCode], let preset = FilterPreset.from(keyIndex: idx) {
+                    if activePreset == preset {
+                        activePreset = nil  // toggle off
+                    } else {
+                        activePreset = preset
+                    }
+                    clearSelection()
+                }
+            }
+            return true
+
         default:
-            return true
-        }
-    }
-
-    // MARK: Actions — quick keys on the selected window
-
-    private func handleActionsKey(_ keyCode: UInt16) -> Bool {
-        switch keyCode {
-        case 53, 123: // Escape or ← → back to browsing
-            desktopMode = .browsing
-            return true
-
-        case 36, 3: // Enter or f → focus
-            focusSelectedWindow()
-            return true
-
-        case 17: // t → tiling sub-mode
-            desktopMode = .tiling
-            return true
-
-        case 4: // h → highlight
-            highlightSelectedWindow()
-            return true
-
-        default:
+            if isSearching { return false }
             return true
         }
     }
@@ -222,8 +832,8 @@ final class CommandModeState: ObservableObject {
 
     private func handleTilingKey(_ keyCode: UInt16) -> Bool {
         switch keyCode {
-        case 53: // Escape → back to actions
-            desktopMode = .actions
+        case 53: // Escape → back to browsing
+            desktopMode = .browsing
             return true
 
         case 123: tileSelectedWindow(to: .left); return true       // ←
@@ -234,42 +844,437 @@ final class CommandModeState: ObservableObject {
         case 20:  tileSelectedWindow(to: .bottomLeft); return true // 3
         case 21:  tileSelectedWindow(to: .bottomRight); return true// 4
         case 8:   tileSelectedWindow(to: .center); return true     // c
+        case 2:   distributeSelectedHorizontally(); return true    // d → distribute
 
         default:
             return true
         }
     }
 
+    // MARK: Grid Preview — Enter/s to apply, Esc to cancel
+
+    private func handleGridPreviewKey(_ keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case 53: // Escape → back to browsing
+            desktopMode = .browsing
+            return true
+
+        case 36, 1: // Enter or s → apply the layout
+            showAndDistributeSelected()
+            desktopMode = .browsing
+            return true
+
+        default:
+            return true
+        }
+    }
+
+    /// Windows arranged in grid order for preview
+    var gridPreviewWindows: [DesktopInventorySnapshot.InventoryWindowInfo] {
+        flatWindowList.filter { selectedWindowIds.contains($0.id) }
+    }
+
+    /// Grid shape for current selection
+    var gridPreviewShape: [Int] {
+        WindowTiler.gridShape(for: selectedWindowIds.count)
+    }
+
+    // MARK: Screen Map Editor
+
+    private func handleScreenMapKey(_ keyCode: UInt16) -> Bool {
+        let diag = DiagnosticLog.shared
+        diag.info("[ScreenMap] key: \(keyCode)")
+        switch keyCode {
+        case 53: // Escape → discard edits or exit
+            if screenMapEditor?.isPreviewing == true {
+                endScreenMapPreview()
+            }
+            if let editor = screenMapEditor, editor.pendingEditCount > 0 {
+                editor.discardEdits()
+                diag.info("[ScreenMap] discarded \(editor.pendingEditCount) edits")
+                flash("Edits discarded")
+            } else {
+                diag.info("[ScreenMap] exit")
+                screenMapEditor = nil
+                desktopMode = .browsing
+            }
+            return true
+
+        case 36: // Enter → apply pending edits
+            if screenMapEditor?.isPreviewing == true {
+                endScreenMapPreview()
+            }
+            diag.info("[ScreenMap] apply edits")
+            applyScreenMapEdits()
+            return true
+
+        case 47: // . → cycle layer
+            screenMapEditor?.cycleLayer()
+            diag.info("[ScreenMap] cycle → \(screenMapEditor?.layerLabel ?? "nil")")
+            objectWillChange.send()
+            return true
+
+        case 33: // [ → move selected windows to previous layer
+            if let editor = screenMapEditor {
+                for wid in selectedWindowIds {
+                    if let idx = editor.windows.firstIndex(where: { $0.id == wid }) {
+                        let oldLayer = editor.windows[idx].layer
+                        let newLayer = max(0, oldLayer - 1)
+                        diag.info("[ScreenMap] [: \(editor.windows[idx].app) L\(oldLayer)→L\(newLayer)")
+                        editor.reassignLayer(windowId: wid, toLayer: newLayer, fitToAvailable: true)
+                    }
+                }
+                objectWillChange.send()
+            }
+            return true
+
+        case 30: // ] → move selected windows to next layer
+            if let editor = screenMapEditor {
+                for wid in selectedWindowIds {
+                    if let idx = editor.windows.firstIndex(where: { $0.id == wid }) {
+                        let oldLayer = editor.windows[idx].layer
+                        let newLayer = oldLayer + 1
+                        diag.info("[ScreenMap] ]: \(editor.windows[idx].app) L\(oldLayer)→L\(newLayer)")
+                        editor.reassignLayer(windowId: wid, toLayer: newLayer, fitToAvailable: true)
+                    }
+                }
+                objectWillChange.send()
+            }
+            return true
+
+        case 1: // s → show & distribute selected (if any)
+            if !selectedWindowIds.isEmpty {
+                diag.info("[ScreenMap] s: grid preview with \(selectedWindowIds.count) selected")
+                screenMapEditor = nil
+                desktopMode = .gridPreview
+            }
+            return true
+
+        case 8: // c → consolidate (defrag) layers
+            diag.info("[ScreenMap] c: consolidate layers")
+            consolidateScreenMapLayers()
+            return true
+
+        case 3: // f → flatten selected layers
+            diag.info("[ScreenMap] f: flatten selected layers")
+            flattenScreenMapLayers()
+            return true
+
+        case 9: // v → toggle layer preview
+            diag.info("[ScreenMap] v: toggle preview")
+            previewScreenMapLayer()
+            return true
+
+        default:
+            return true
+        }
+    }
+
+    /// Snapshot on-screen windows into the screen map editor
+    func enterScreenMapEditor() {
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return }
+
+        struct CGWin {
+            let wid: UInt32; let pid: Int32; let app: String; let title: String
+            let frame: CGRect; let layer: Int
+        }
+
+        var ordered: [CGWin] = []
+        for info in windowList {
+            guard let wid = info[kCGWindowNumber as String] as? UInt32,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary else { continue }
+            var rect = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(boundsDict, &rect) else { continue }
+            guard rect.width >= 100 && rect.height >= 50 else { continue }
+            let app = info[kCGWindowOwnerName as String] as? String ?? ""
+            if app == "DevmuxApp" || app == "devmux" { continue }
+            let pid = info[kCGWindowOwnerPID as String] as? Int32 ?? 0
+            let title = info[kCGWindowName as String] as? String ?? ""
+            ordered.append(CGWin(wid: wid, pid: pid, app: app, title: title, frame: rect, layer: layer))
+        }
+
+        NSLog("[ScreenMap] enterScreenMapEditor: %d windows after filtering", ordered.count)
+
+        // Iterative peeling: significantly overlapped windows go to deeper layers.
+        // "Significant" = intersection area ≥ 15% of the smaller window's area.
+        // Windows in `ordered` are z-ordered (0 = frontmost).
+        func significantOverlap(_ a: CGRect, _ b: CGRect) -> Bool {
+            let inter = a.intersection(b)
+            guard !inter.isNull && inter.width > 0 && inter.height > 0 else { return false }
+            let interArea = inter.width * inter.height
+            let smallerArea = min(a.width * a.height, b.width * b.height)
+            guard smallerArea > 0 else { return false }
+            return interArea / smallerArea >= 0.15
+        }
+
+        var remaining = Set(ordered.indices)
+        var layerAssignment = [Int: Int]()  // index → layer
+        var layer = 0
+        while !remaining.isEmpty {
+            var unoccluded: [Int] = []
+            for i in remaining {
+                let frame = ordered[i].frame
+                let isOccluded = remaining.contains(where: { j in
+                    j < i && significantOverlap(ordered[j].frame, frame)
+                })
+                if !isOccluded {
+                    unoccluded.append(i)
+                }
+            }
+            // Safety valve: mutual overlap — assign all remaining to current layer
+            if unoccluded.isEmpty {
+                for i in remaining { layerAssignment[i] = layer }
+                remaining.removeAll()
+                break
+            }
+            for i in unoccluded {
+                layerAssignment[i] = layer
+                remaining.remove(i)
+            }
+            layer += 1
+        }
+
+        var mapWindows: [ScreenMapWindow] = []
+        for (i, win) in ordered.enumerated() {
+            let assignedLayer = layerAssignment[i] ?? 0
+            mapWindows.append(ScreenMapWindow(
+                id: win.wid, pid: win.pid, app: win.app, title: win.title,
+                originalFrame: win.frame, editedFrame: win.frame,
+                zIndex: i, layer: assignedLayer
+            ))
+        }
+
+        let totalLayers = (mapWindows.map(\.layer).max() ?? 0) + 1
+        NSLog("[ScreenMap] Peeling complete: %d layers from %d windows", totalLayers, mapWindows.count)
+        for l in 0..<totalLayers {
+            let count = mapWindows.filter { $0.layer == l }.count
+            let names = mapWindows.filter { $0.layer == l }.map { $0.app }.joined(separator: ", ")
+            NSLog("[ScreenMap]   Layer %d: %d windows [%@]", l, count, names)
+        }
+
+        screenMapEditor = ScreenMapEditorState(windows: mapWindows)
+        desktopMode = .screenMap
+    }
+
+    /// Apply all pending screen map edits (moves + resizes)
+    private func applyScreenMapEdits() {
+        guard let editor = screenMapEditor else { return }
+        let pendingEdits = editor.windows.filter(\.hasEdits)
+        guard !pendingEdits.isEmpty else {
+            screenMapEditor = nil
+            desktopMode = .browsing
+            return
+        }
+
+        // Save original positions for undo (restore/keep banner)
+        var positions: [UInt32: (pid: Int32, frame: WindowFrame)] = [:]
+        for win in pendingEdits {
+            positions[win.id] = (pid: win.pid, frame: WindowFrame(
+                x: Double(win.originalFrame.origin.x), y: Double(win.originalFrame.origin.y),
+                w: Double(win.originalFrame.width), h: Double(win.originalFrame.height)
+            ))
+        }
+        savedPositions = positions
+
+        // Sort by layer descending (deepest layers first → front layers last so they end up on top)
+        let sorted = pendingEdits.sorted(by: { $0.layer > $1.layer })
+        let allMoves = sorted.map { (wid: $0.id, pid: $0.pid, frame: $0.editedFrame) }
+        NSLog("[ScreenMap] Applying %d edits (sorted by layer desc)", allMoves.count)
+        for m in allMoves {
+            NSLog("[ScreenMap]   wid=%u → %.0f,%.0f %.0fx%.0f", m.wid, m.frame.origin.x, m.frame.origin.y, m.frame.width, m.frame.height)
+        }
+        WindowTiler.batchMoveWindows(allMoves)
+
+        let noun = pendingEdits.count == 1 ? "edit" : "edits"
+        flash("Applied \(pendingEdits.count) \(noun)")
+        screenMapEditor = nil
+        desktopMode = .browsing
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.desktopSnapshot = self?.buildDesktopInventory()
+        }
+    }
+
+    /// Flatten selected layers into the lowest one
+    func flattenScreenMapLayers() {
+        guard let editor = screenMapEditor else { return }
+        if let result = editor.flattenSelectedLayers() {
+            flash("Merged \(result.count) windows into L\(result.target)")
+        } else {
+            flash("Select 2+ layers to flatten")
+        }
+        objectWillChange.send()
+    }
+
+    // MARK: - Layer Preview
+
+    /// Single overlay window + event monitors
+    var previewWindow: NSWindow? = nil
+    private var previewGlobalMonitor: Any? = nil
+    private var previewLocalMonitor: Any? = nil
+
+    /// Captured window images for preview (wid → NSImage)
+    var previewCaptures: [UInt32: NSImage] = [:]
+
+    /// Toggle preview: capture screenshots + show overlay
+    func previewScreenMapLayer() {
+        guard let editor = screenMapEditor else { return }
+
+        if editor.isPreviewing {
+            endScreenMapPreview()
+            return
+        }
+
+        let visible = editor.visibleWindows
+        guard !visible.isEmpty else {
+            flash("No windows to preview")
+            return
+        }
+
+        let diag = DiagnosticLog.shared
+        diag.info("[Preview] capturing \(visible.count) windows")
+
+        // Capture screenshot of each window via CGWindowListCreateImage
+        var captures: [UInt32: NSImage] = [:]
+        for win in visible {
+            if let cgImage = CGWindowListCreateImage(
+                .null,
+                .optionIncludingWindow,
+                CGWindowID(win.id),
+                [.boundsIgnoreFraming, .bestResolution]
+            ) {
+                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: win.editedFrame.width, height: win.editedFrame.height))
+                captures[win.id] = nsImage
+                diag.info("[Preview] captured wid=\(win.id) \(win.app): \(cgImage.width)×\(cgImage.height)px → frame=\(Int(win.editedFrame.origin.x)),\(Int(win.editedFrame.origin.y)) \(Int(win.editedFrame.width))×\(Int(win.editedFrame.height))")
+            } else {
+                diag.warn("[Preview] failed to capture wid=\(win.id) \(win.app)")
+            }
+        }
+        previewCaptures = captures
+
+        editor.isPreviewing = true
+        objectWillChange.send()
+
+        // View layer will call showPreviewWindow() via onChange
+    }
+
+    /// Called from the view layer to create the overlay window
+    func showPreviewWindow(contentView: NSView) {
+        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let window = NSWindow(
+            contentRect: screen.frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
+        window.hasShadow = false
+        window.contentView = contentView
+        window.orderFrontRegardless()
+        previewWindow = window
+
+        // Arm event monitors immediately (no AX calls → no activation race)
+        previewGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.endScreenMapPreview()
+        }
+        previewLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.endScreenMapPreview()
+            return nil
+        }
+    }
+
+    /// Dismiss the preview overlay
+    func endScreenMapPreview() {
+        guard screenMapEditor?.isPreviewing == true else { return }
+
+        previewWindow?.orderOut(nil)
+        previewWindow = nil
+
+        if let m = previewGlobalMonitor { NSEvent.removeMonitor(m) }
+        if let m = previewLocalMonitor { NSEvent.removeMonitor(m) }
+        previewGlobalMonitor = nil
+        previewLocalMonitor = nil
+
+        previewCaptures = [:]
+        screenMapEditor?.isPreviewing = false
+
+        objectWillChange.send()
+    }
+
+    /// Consolidate screen map layers (defrag) and show flash
+    func consolidateScreenMapLayers() {
+        guard let editor = screenMapEditor else { return }
+        let result = editor.consolidateLayers()
+        if result.old == result.new {
+            flash("Already optimal")
+        } else {
+            flash("Consolidated \(result.old) → \(result.new) layers")
+        }
+        objectWillChange.send()
+    }
+
     // MARK: - Selection Actions
 
     /// Move selection up/down within the flat window list (stays in same display column when possible)
     private func moveSelectionVertical(_ delta: Int) {
-        guard let snapshot = desktopSnapshot else { return }
+        guard let snapshot = filteredSnapshot else { return }
 
-        // If we have a current selection, navigate within the same display
-        if let currentId = selectedWindowId,
-           let displayIdx = displayIndex(for: currentId, in: snapshot) {
+        let anchor = cursorWindowId ?? selectedWindowId
+        if let anchor = anchor,
+           let displayIdx = displayIndex(for: anchor, in: snapshot) {
             let displayWindows = windowsInDisplay(displayIdx, snapshot: snapshot)
-            if let localIdx = displayWindows.firstIndex(where: { $0.id == currentId }) {
+            if let localIdx = displayWindows.firstIndex(where: { $0.id == anchor }) {
                 let newIdx = max(0, min(displayWindows.count - 1, localIdx + delta))
-                selectedWindowId = displayWindows[newIdx].id
+                selectSingle(displayWindows[newIdx].id)
             }
         } else {
             // No selection — pick first window in first display
             let windows = flatWindowList
             guard !windows.isEmpty else { return }
-            selectedWindowId = delta > 0 ? windows.first?.id : windows.last?.id
+            if let id = delta > 0 ? windows.first?.id : windows.last?.id {
+                selectSingle(id)
+            }
         }
 
-        if let wid = selectedWindowId, let win = flatWindowList.first(where: { $0.id == wid }) {
+        if let wid = cursorWindowId, let win = flatWindowList.first(where: { $0.id == wid }) {
             let title = win.title.isEmpty ? "(untitled)" : String(win.title.prefix(30))
             DiagnosticLog.shared.info("Select: wid=\(wid) \"\(title)\"")
         }
     }
 
+    /// Extend selection up/down (Shift+arrow) — adds items without removing existing selection
+    private func extendSelectionVertical(_ delta: Int) {
+        guard let snapshot = filteredSnapshot else { return }
+
+        let anchor = cursorWindowId ?? selectedWindowId
+        if let anchor = anchor,
+           let displayIdx = displayIndex(for: anchor, in: snapshot) {
+            let displayWindows = windowsInDisplay(displayIdx, snapshot: snapshot)
+            if let localIdx = displayWindows.firstIndex(where: { $0.id == anchor }) {
+                let newIdx = max(0, min(displayWindows.count - 1, localIdx + delta))
+                let newId = displayWindows[newIdx].id
+                selectedWindowIds.insert(newId)
+                cursorWindowId = newId
+            }
+        } else {
+            let windows = flatWindowList
+            guard !windows.isEmpty else { return }
+            if let id = delta > 0 ? windows.first?.id : windows.last?.id {
+                selectedWindowIds.insert(id)
+                cursorWindowId = id
+            }
+        }
+    }
+
     /// Jump selection to the adjacent display column
     private func moveSelectionToDisplay(delta: Int) {
-        guard let snapshot = desktopSnapshot, snapshot.displays.count > 1 else { return }
+        guard let snapshot = filteredSnapshot, snapshot.displays.count > 1 else { return }
 
         let displayCount = snapshot.displays.count
 
@@ -295,9 +1300,9 @@ final class CommandModeState: ObservableObject {
             let srcWindows = windowsInDisplay(srcIdx, snapshot: snapshot)
             let srcPos = srcWindows.firstIndex(where: { $0.id == wid }) ?? 0
             let targetPos = min(srcPos, targetWindows.count - 1)
-            selectedWindowId = targetWindows[targetPos].id
-        } else {
-            selectedWindowId = targetWindows.first?.id
+            selectSingle(targetWindows[targetPos].id)
+        } else if let id = targetWindows.first?.id {
+            selectSingle(id)
         }
 
         DiagnosticLog.shared.info("Jump to display \(targetIdx + 1)")
@@ -325,16 +1330,25 @@ final class CommandModeState: ObservableObject {
         return snapshot.displays[displayIdx].spaces.flatMap { $0.apps.flatMap { $0.windows } }
     }
 
+    private func bringSelectedToFront() {
+        guard let wid = selectedWindowId,
+              let window = flatWindowList.first(where: { $0.id == wid }) else { return }
+        DiagnosticLog.shared.info("Front: wid=\(wid) pid=\(window.pid)")
+        WindowTiler.raiseWindowAndReactivate(wid: wid, pid: window.pid)
+    }
+
+    private func bringAllSelectedToFront() {
+        let windows = flatWindowList.filter { selectedWindowIds.contains($0.id) }
+        guard !windows.isEmpty else { return }
+        DiagnosticLog.shared.info("Front all: \(windows.count) windows")
+        WindowTiler.raiseWindowsAndReactivate(windows: windows.map { (wid: $0.id, pid: $0.pid) })
+    }
+
     private func focusSelectedWindow() {
         guard let wid = selectedWindowId,
               let window = flatWindowList.first(where: { $0.id == wid }) else { return }
-
         DiagnosticLog.shared.info("Focus: wid=\(wid) pid=\(window.pid)")
-        let pid = window.pid
-        dismiss()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            WindowTiler.navigateToWindowById(wid: wid, pid: pid)
-        }
+        WindowTiler.raiseWindowAndReactivate(wid: wid, pid: window.pid)
     }
 
     private func highlightSelectedWindow() {
@@ -344,15 +1358,141 @@ final class CommandModeState: ObservableObject {
     }
 
     private func tileSelectedWindow(to position: TilePosition) {
+        if selectedWindowIds.count > 1 {
+            tileAllSelected(to: position)
+            return
+        }
         guard let wid = selectedWindowId,
               let window = flatWindowList.first(where: { $0.id == wid }) else { return }
 
         DiagnosticLog.shared.info("Tile: wid=\(wid) → \(position.rawValue)")
         WindowTiler.tileWindowById(wid: wid, pid: window.pid, to: position)
-        desktopMode = .browsing
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.desktopSnapshot = self?.buildDesktopInventory()
+        }
+    }
+
+    private func tileAllSelected(to position: TilePosition) {
+        let windows = flatWindowList.filter { selectedWindowIds.contains($0.id) }
+        guard !windows.isEmpty else { return }
+
+        // For left/right with 2+ windows: distribute evenly across width
+        if windows.count >= 2 && (position == .left || position == .right) {
+            distributeSelectedHorizontally()
+            return
+        }
+
+        DiagnosticLog.shared.info("Tile all \(windows.count): \(position.rawValue)")
+        for win in windows {
+            WindowTiler.tileWindowById(wid: win.id, pid: win.pid, to: position)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.desktopSnapshot = self?.buildDesktopInventory()
+        }
+    }
+
+    private func distributeSelectedHorizontally() {
+        let windows = flatWindowList.filter { selectedWindowIds.contains($0.id) }
+        guard windows.count >= 2 else { return }
+        DiagnosticLog.shared.info("Distribute H: \(windows.count) windows")
+        WindowTiler.tileDistributeHorizontally(windows: windows.map { (wid: $0.id, pid: $0.pid) })
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.desktopSnapshot = self?.buildDesktopInventory()
+        }
+    }
+
+    // MARK: - Batch Actions (multi-select)
+
+    func focusAllSelected() {
+        let windows = flatWindowList.filter { selectedWindowIds.contains($0.id) }
+        guard !windows.isEmpty else { return }
+        DiagnosticLog.shared.info("Focus all: \(windows.count) windows")
+        WindowTiler.raiseWindowsAndReactivate(windows: windows.map { (wid: $0.id, pid: $0.pid) })
+    }
+
+    func highlightAllSelected() {
+        let wids = flatWindowList.filter { selectedWindowIds.contains($0.id) }.map(\.id)
+        guard !wids.isEmpty else { return }
+        DiagnosticLog.shared.info("Highlight all: \(wids.count) windows")
+        for wid in wids {
+            WindowTiler.highlightWindowById(wid: wid)
+        }
+    }
+
+    /// Show all selected windows (raise to front) without changing layout
+    func showAllSelected() {
+        let windows = flatWindowList.filter { selectedWindowIds.contains($0.id) }
+        guard !windows.isEmpty else { return }
+        savePositions(for: windows)
+        WindowTiler.raiseWindowsAndReactivate(windows: windows.map { (wid: $0.id, pid: $0.pid) })
+        flash("Showing \(windows.count) window\(windows.count == 1 ? "" : "s")")
+    }
+
+    /// Show all selected windows AND distribute in smart grid — single batch operation
+    func showAndDistributeSelected() {
+        let windows = flatWindowList.filter { selectedWindowIds.contains($0.id) }
+        guard !windows.isEmpty else { return }
+        savePositions(for: windows)
+        WindowTiler.batchRaiseAndDistribute(windows: windows.map { (wid: $0.id, pid: $0.pid) })
+        let shape = WindowTiler.gridShape(for: windows.count)
+        let grid = shape.map(String.init).joined(separator: "+")
+        flash("\(windows.count) windows [\(grid)]")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.desktopSnapshot = self?.buildDesktopInventory()
+        }
+    }
+
+    /// Distribute selected in smart grid without raising
+    func distributeSelected() {
+        let windows = flatWindowList.filter { selectedWindowIds.contains($0.id) }
+        guard !windows.isEmpty else { return }
+        savePositions(for: windows)
+        WindowTiler.batchRaiseAndDistribute(windows: windows.map { (wid: $0.id, pid: $0.pid) })
+        let shape = WindowTiler.gridShape(for: windows.count)
+        let grid = shape.map(String.init).joined(separator: "+")
+        flash("\(windows.count) windows [\(grid)]")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.desktopSnapshot = self?.buildDesktopInventory()
+        }
+    }
+
+    /// Save current positions of windows so they can be restored later
+    private func savePositions(for windows: [DesktopInventorySnapshot.InventoryWindowInfo]) {
+        // Don't overwrite if already saved (allow chaining actions)
+        guard savedPositions == nil else { return }
+        var positions: [UInt32: (pid: Int32, frame: WindowFrame)] = [:]
+        for win in windows {
+            positions[win.id] = (pid: win.pid, frame: win.frame)
+        }
+        savedPositions = positions
+        DiagnosticLog.shared.info("Saved positions for \(positions.count) windows")
+    }
+
+    /// Restore windows to their saved positions — single batch operation
+    func restorePositions() {
+        guard let positions = savedPositions else { return }
+        DiagnosticLog.shared.info("Restoring \(positions.count) window positions")
+        let restores = positions.map { (wid: $0.key, pid: $0.value.pid, frame: $0.value.frame) }
+        WindowTiler.batchRestoreWindows(restores)
+        savedPositions = nil
+        flash("Restored \(restores.count) window\(restores.count == 1 ? "" : "s")")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.desktopSnapshot = self?.buildDesktopInventory()
+        }
+    }
+
+    /// Accept the current layout — discard saved positions
+    func discardSavedPositions() {
+        savedPositions = nil
+        DiagnosticLog.shared.info("Accepted layout, discarded saved positions")
+    }
+
+    /// Show a brief flash message that auto-dismisses
+    private func flash(_ message: String) {
+        flashMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            if self?.flashMessage == message { self?.flashMessage = nil }
         }
     }
 
@@ -374,14 +1514,16 @@ final class CommandModeState: ObservableObject {
                         let tile = win.tilePosition?.label ?? "—"
                         let title = win.title.isEmpty ? "(untitled)" : win.title
                         let dmx = win.isDevmux ? " [devmux]" : ""
-                        lines.append("    \(app.appName)  \(title)\(dmx)  \(Int(win.frame.w))×\(Int(win.frame.h))  \(tile)")
+                        let path = win.inventoryPath?.description ?? ""
+                        lines.append("    \(app.appName)  \(title)\(dmx)  \(Int(win.frame.w))×\(Int(win.frame.h))  \(tile)  \(path)")
                     } else {
                         lines.append("    \(app.appName)")
                         for win in app.windows {
                             let tile = win.tilePosition?.label ?? "—"
                             let title = win.title.isEmpty ? "(untitled)" : win.title
                             let dmx = win.isDevmux ? " [devmux]" : ""
-                            lines.append("      \(title)\(dmx)  \(Int(win.frame.w))×\(Int(win.frame.h))  \(tile)")
+                            let path = win.inventoryPath?.description ?? ""
+                            lines.append("      \(title)\(dmx)  \(Int(win.frame.w))×\(Int(win.frame.h))  \(tile)  \(path)")
                         }
                     }
                 }
@@ -484,9 +1626,20 @@ final class CommandModeState: ObservableObject {
     // MARK: - Desktop Inventory Builder
 
     private func buildDesktopInventory() -> DesktopInventorySnapshot {
-        let screens = NSScreen.screens
+        let originalScreens = NSScreen.screens
         let displaySpaces = WindowTiler.getDisplaySpaces()
-        let primaryHeight = screens.first?.frame.height ?? 0
+        let primaryHeight = originalScreens.first?.frame.height ?? 0
+
+        // Sort screens left-to-right by frame origin, tie-break top-to-bottom
+        let sortedScreens = originalScreens.sorted {
+            if $0.frame.origin.x != $1.frame.origin.x {
+                return $0.frame.origin.x < $1.frame.origin.x
+            }
+            return $0.frame.origin.y > $1.frame.origin.y
+        }
+        // Map sorted index → original index for displaySpaces lookup
+        let sortedToOriginal = sortedScreens.map { s in originalScreens.firstIndex(where: { $0 === s })! }
+        let screens = sortedScreens
 
         // Build space-to-display mapping: spaceId → (displayIndex, spaceIndex)
         var spaceToDisplay: [Int: (displayIdx: Int, spaceIdx: Int)] = [:]
@@ -613,11 +1766,12 @@ final class CommandModeState: ObservableObject {
                 let nsCy = primaryHeight - cy
                 for (sIdx, screen) in screens.enumerated() {
                     if screen.frame.contains(NSPoint(x: cx, y: nsCy)) {
-                        let ds = sIdx < displaySpaces.count ? displaySpaces[sIdx] : nil
+                        let origIdx = sortedToOriginal[sIdx]
+                        let ds = origIdx < displaySpaces.count ? displaySpaces[origIdx] : nil
                         let currentSid = ds?.currentSpaceId ?? 0
                         let currentIdx = ds?.spaces.first(where: { $0.isCurrent })?.index ?? 1
                         assigned.append(AssignedWindow(
-                            win: win, displayIdx: sIdx,
+                            win: win, displayIdx: origIdx,
                             spaceId: currentSid, spaceIdx: currentIdx, isOnScreen: true
                         ))
                         break
@@ -634,11 +1788,12 @@ final class CommandModeState: ObservableObject {
             let visible = screen.visibleFrame
             let name = screen.localizedName
 
-            let ds = screenIdx < displaySpaces.count ? displaySpaces[screenIdx] : nil
+            let originalIdx = sortedToOriginal[screenIdx]
+            let ds = originalIdx < displaySpaces.count ? displaySpaces[originalIdx] : nil
             let spaceCount = ds?.spaces.count ?? 1
             let currentSpaceIdx = ds?.spaces.first(where: { $0.isCurrent })?.index ?? 1
 
-            let screenWindows = assigned.filter { $0.displayIdx == screenIdx }
+            let screenWindows = assigned.filter { $0.displayIdx == originalIdx }
 
             // Group by space
             var windowsBySpace: [Int: [AssignedWindow]] = [:]
@@ -647,6 +1802,8 @@ final class CommandModeState: ObservableObject {
             }
 
             // Build SpaceGroups sorted by space index
+            let isMain = screen == NSScreen.main
+            let displayLabel = InventoryPath.displayName(for: screen, isMain: isMain)
             var spaceGroups: [DesktopInventorySnapshot.SpaceGroup] = []
             let allSpacesForDisplay = ds?.spaces ?? []
 
@@ -663,8 +1820,16 @@ final class CommandModeState: ObservableObject {
                 var groups: [DesktopInventorySnapshot.AppGroup] = []
                 for appName in appGroups.keys.sorted() {
                     let wins = appGroups[appName]!
+                    let appType = AppTypeClassifier.classify(appName)
                     let inventoryWindows = wins.map { aw -> DesktopInventorySnapshot.InventoryWindowInfo in
                         let tile = aw.isOnScreen ? WindowTiler.inferTilePosition(frame: aw.win.frame, screen: screen) : nil
+                        let path = InventoryPath(
+                            display: displayLabel,
+                            space: "space\(aw.spaceIdx)",
+                            appType: appType.rawValue,
+                            appName: appName,
+                            windowTitle: aw.win.title.isEmpty ? "untitled" : aw.win.title
+                        )
                         return DesktopInventorySnapshot.InventoryWindowInfo(
                             id: aw.win.wid,
                             pid: aw.win.pid,
@@ -674,7 +1839,9 @@ final class CommandModeState: ObservableObject {
                             isDevmux: aw.win.devmuxSession != nil,
                             devmuxSession: aw.win.devmuxSession,
                             spaceIndex: aw.spaceIdx,
-                            isOnScreen: aw.isOnScreen
+                            isOnScreen: aw.isOnScreen,
+                            inventoryPath: path,
+                            appName: appName
                         )
                     }
                     groups.append(DesktopInventorySnapshot.AppGroup(
@@ -692,7 +1859,6 @@ final class CommandModeState: ObservableObject {
                 ))
             }
 
-            let isMain = screen == NSScreen.main
             displays.append(DesktopInventorySnapshot.DisplayInfo(
                 id: ds?.displayId ?? "display-\(screenIdx)",
                 name: name,
@@ -744,15 +1910,21 @@ final class CommandModeState: ObservableObject {
             }
         })
 
-        // [1]-[3] layer switching (dynamic)
+        // [1]-[3] layer focus (dynamic)
         let layers = workspace.config?.layers ?? []
         let layerKeyCodes: [UInt16] = [18, 19, 20]  // 1, 2, 3
         for (i, layer) in layers.prefix(3).enumerated() {
             let idx = i
             chords.append(Chord(key: "\(i + 1)", keyCode: layerKeyCodes[i], label: layer.label.lowercased()) {
-                WorkspaceManager.shared.switchToLayer(index: idx)
+                WorkspaceManager.shared.focusLayer(index: idx)
             })
         }
+
+        // [l] launch layer — explicitly start non-running projects
+        chords.append(Chord(key: "l", keyCode: 37, label: "launch layer") {
+            let ws = WorkspaceManager.shared
+            ws.switchToLayer(index: ws.activeLayerIndex, force: true)
+        })
 
         // [r] refresh
         chords.append(Chord(key: "r", keyCode: 15, label: "refresh") {

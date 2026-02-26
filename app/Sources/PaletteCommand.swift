@@ -227,22 +227,128 @@ enum CommandBuilder {
 
         var commands = projectCmds + windowCmds
 
-        // Layer switching commands
+        // Layer commands (focus + launch)
         let workspace = WorkspaceManager.shared
         if let wsConfig = workspace.config {
-            for (i, layer) in wsConfig.layers.enumerated() {
+            for (i, layer) in (wsConfig.layers ?? []).enumerated() {
                 let layerIndex = i
                 let isActive = i == workspace.activeLayerIndex
+                let counts = workspace.layerRunningCount(index: i)
                 commands.append(PaletteCommand(
-                    id: "layer-\(layer.id)",
-                    title: "Switch to Layer: \(layer.label)",
-                    subtitle: "\(layer.projects.count) project\(layer.projects.count == 1 ? "" : "s") \u{2014} \u{2325}\(i + 1)",
+                    id: "layer-focus-\(layer.id)",
+                    title: "Focus Layer: \(layer.label)",
+                    subtitle: "\(counts.running)/\(counts.total) running \u{2014} \u{2325}\(i + 1)",
                     icon: "square.stack.3d.up",
+                    category: .app,
+                    badge: isActive ? "active" : nil,
+                    action: { workspace.focusLayer(index: layerIndex) }
+                ))
+                commands.append(PaletteCommand(
+                    id: "layer-launch-\(layer.id)",
+                    title: "Launch Layer: \(layer.label)",
+                    subtitle: "Start all \(layer.projects.count) project\(layer.projects.count == 1 ? "" : "s")",
+                    icon: "play.circle",
                     category: .app,
                     badge: isActive ? "active" : nil,
                     action: { workspace.switchToLayer(index: layerIndex) }
                 ))
             }
+
+            // Tab group commands
+            for group in wsConfig.groups ?? [] {
+                let isRunning = workspace.isGroupRunning(group)
+
+                if isRunning {
+                    commands.append(PaletteCommand(
+                        id: "group-attach-\(group.id)",
+                        title: "Attach \(group.label)",
+                        subtitle: "\(group.tabs.count) tabs",
+                        icon: "rectangle.stack",
+                        category: .project,
+                        badge: "group",
+                        action: {
+                            if let firstTab = group.tabs.first {
+                                let session = WorkspaceManager.sessionName(for: firstTab.path)
+                                let terminal = Preferences.shared.terminal
+                                terminal.focusOrAttach(session: session)
+                            }
+                        }
+                    ))
+
+                    // Per-tab focus commands
+                    for (idx, tab) in group.tabs.enumerated() {
+                        let tabLabel = tab.label ?? (tab.path as NSString).lastPathComponent
+                        let tabIndex = idx
+                        commands.append(PaletteCommand(
+                            id: "group-tab-\(group.id)-\(idx)",
+                            title: "\(group.label): \(tabLabel)",
+                            subtitle: "Focus tab \(idx + 1) in group",
+                            icon: "rectangle.topthird.inset.filled",
+                            category: .project,
+                            badge: nil,
+                            action: {
+                                workspace.focusTab(group: group, tabIndex: tabIndex)
+                            }
+                        ))
+                    }
+
+                    commands.append(PaletteCommand(
+                        id: "group-kill-\(group.id)",
+                        title: "Kill \(group.label) Group",
+                        subtitle: "Terminate the group session",
+                        icon: "xmark.circle.fill",
+                        category: .window,
+                        badge: nil,
+                        action: {
+                            workspace.killGroup(group)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                scanner.refreshStatus()
+                            }
+                        }
+                    ))
+                } else {
+                    commands.append(PaletteCommand(
+                        id: "group-launch-\(group.id)",
+                        title: "Launch \(group.label)",
+                        subtitle: "\(group.tabs.count) tabs \u{2014} \(group.tabs.map { $0.label ?? ($0.path as NSString).lastPathComponent }.joined(separator: ", "))",
+                        icon: "rectangle.stack",
+                        category: .project,
+                        badge: "group",
+                        action: { workspace.launchGroup(group) }
+                    ))
+                }
+            }
+        }
+
+        // Orphan session commands
+        let inventory = InventoryManager.shared
+        for orphan in inventory.orphans {
+            commands.append(PaletteCommand(
+                id: "orphan-attach-\(orphan.name)",
+                title: "Attach \(orphan.name)",
+                subtitle: "\(orphan.panes.count) pane\(orphan.panes.count == 1 ? "" : "s") \u{2014} \(orphan.panes.prefix(3).map(\.currentCommand).joined(separator: ", "))",
+                icon: "play.fill",
+                category: .project,
+                badge: "orphan",
+                action: {
+                    let terminal = Preferences.shared.terminal
+                    terminal.focusOrAttach(session: orphan.name)
+                }
+            ))
+            commands.append(PaletteCommand(
+                id: "orphan-kill-\(orphan.name)",
+                title: "Kill \(orphan.name)",
+                subtitle: "Terminate unmanaged tmux session",
+                icon: "xmark.circle.fill",
+                category: .window,
+                badge: "orphan",
+                action: {
+                    SessionManager.killByName(orphan.name)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        inventory.refresh()
+                    }
+                }
+            ))
         }
 
         // App actions

@@ -12,6 +12,9 @@ final class CommandModeWindow {
 
     private var panel: NSPanel?
 
+    /// Exposed for event monitor filtering (only handle clicks in this window)
+    var panelWindow: NSWindow? { panel }
+
     var isVisible: Bool { panel?.isVisible ?? false }
 
     func toggle() {
@@ -40,6 +43,18 @@ final class CommandModeWindow {
         }
         state.enter()
 
+        // Compute initial size from state phase
+        let initialWidth: CGFloat
+        let initialHeight: CGFloat
+        if state.phase == .desktopInventory {
+            let displayCount = max(1, state.desktopSnapshot?.displays.count ?? 1)
+            let columnWidth: CGFloat = 480
+            initialWidth = CGFloat(displayCount) * columnWidth + CGFloat(displayCount - 1) + 32
+            initialHeight = 640
+        } else {
+            initialWidth = 580; initialHeight = 360
+        }
+
         let view = CommandModeView(state: state)
             .preferredColorScheme(.dark)
 
@@ -47,7 +62,7 @@ final class CommandModeWindow {
         hosting.translatesAutoresizingMaskIntoConstraints = false
 
         let panel = CommandModePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 580, height: 360),
+            contentRect: NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight),
             styleMask: [.nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -84,8 +99,10 @@ final class CommandModeWindow {
         // Center horizontally, slightly above vertical center
         if let screen = NSScreen.main {
             let screenFrame = screen.visibleFrame
-            let x = screenFrame.midX - 290
-            let y = screenFrame.midY - 180 + (screenFrame.height * 0.1)
+            let clampedWidth = min(initialWidth, screenFrame.width * 0.92)
+            let clampedHeight = min(initialHeight, screenFrame.height * 0.85)
+            let x = screenFrame.midX - clampedWidth / 2
+            let y = screenFrame.midY - clampedHeight / 2 + (screenFrame.height * 0.08)
             panel.setFrameOrigin(NSPoint(x: x, y: y))
         }
 

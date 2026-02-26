@@ -49,10 +49,22 @@ Available for running sessions:
 | Detach *project*              | Disconnect clients, keep session alive   |
 | Kill *project*                | Terminate the tmux session               |
 
+### Tab group commands
+
+Available when `groups` are configured in `~/.devmux/workspace.json`
+(see [Tab Groups](/docs/layers#tab-groups)):
+
+| Command                     | Description                              |
+|-----------------------------|------------------------------------------|
+| Launch *group*              | Start the group session (all tabs)       |
+| Attach *group*              | Focus the running group session          |
+| *Group*: *Tab*              | Switch to a specific tab within a group  |
+| Kill *group* Group          | Terminate the group session              |
+
 ### Layer commands
 
-Available when `~/.devmux/workspace.json` is configured
-(see [Workspace Layers](/docs/layers)):
+Available when `layers` are configured in `~/.devmux/workspace.json`
+(see [Layers](/docs/layers#layers)):
 
 | Command                     | Description                              |
 |-----------------------------|------------------------------------------|

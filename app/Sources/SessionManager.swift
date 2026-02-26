@@ -32,9 +32,14 @@ enum SessionManager {
 
     /// Kill a tmux session
     static func kill(project: Project) {
+        killByName(project.sessionName)
+    }
+
+    /// Kill a tmux session by name string (for orphan sessions without a Project object)
+    static func killByName(_ sessionName: String) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: tmuxPath)
-        task.arguments = ["kill-session", "-t", project.sessionName]
+        task.arguments = ["kill-session", "-t", sessionName]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try? task.run()

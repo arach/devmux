@@ -3,7 +3,19 @@
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { basename, resolve, dirname } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+// Daemon client (lazy-loaded to avoid blocking startup for TTY commands)
+let _daemonClient;
+async function getDaemonClient() {
+  if (!_daemonClient) {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    _daemonClient = await import(resolve(__dirname, "daemon-client.js"));
+  }
+  return _daemonClient;
+}
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -58,6 +70,268 @@ function readConfig(dir) {
   } catch (e) {
     console.warn(`Warning: invalid .devmux.json — ${e.message}`);
     return null;
+  }
+}
+
+// ── Workspace config (tab groups) ───────────────────────────────────
+
+function readWorkspaceConfig() {
+  const configPath = resolve(homedir(), ".devmux", "workspace.json");
+  if (!existsSync(configPath)) return null;
+  try {
+    const raw = readFileSync(configPath, "utf8");
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn(`Warning: invalid workspace.json — ${e.message}`);
+    return null;
+  }
+}
+
+function toGroupSessionName(groupId) {
+  return `devmux-group-${groupId}`;
+}
+
+/** Get ordered pane IDs for a specific window within a session */
+function getPaneIdsForWindow(sessionName, windowIndex) {
+  const out = runQuiet(
+    `tmux list-panes -t "${sessionName}:${windowIndex}" -F "#{pane_id}"`
+  );
+  return out ? out.split("\n").filter(Boolean) : [];
+}
+
+/** Create a tmux window with pane layout for a project dir */
+function createWindowForProject(sessionName, windowIndex, dir, label) {
+  const config = readConfig(dir);
+  const d = esc(dir);
+
+  let panes;
+  if (config?.panes?.length) {
+    panes = resolvePane(config.panes, dir);
+  } else {
+    panes = defaultPanes(dir);
+  }
+
+  if (windowIndex === 0) {
+    // First window already exists from new-session, just set working dir
+    run(`tmux send-keys -t "${sessionName}:0" 'cd ${d}' Enter`);
+  } else {
+    run(`tmux new-window -t "${sessionName}" -c '${d}'`);
+  }
+
+  const winTarget = `${sessionName}:${windowIndex}`;
+
+  // Rename the window
+  const winLabel = label || basename(dir);
+  runQuiet(`tmux rename-window -t "${winTarget}" "${winLabel}"`);
+
+  // Create pane splits
+  if (panes.length === 2) {
+    const mainSize = panes[0].size || 60;
+    run(`tmux split-window -h -t "${winTarget}" -c '${d}' -p ${100 - mainSize}`);
+  } else if (panes.length >= 3) {
+    const mainSize = panes[0].size || 60;
+    for (let i = 1; i < panes.length; i++) {
+      run(`tmux split-window -t "${winTarget}" -c '${d}'`);
+    }
+    runQuiet(`tmux set-option -t "${winTarget}" -w main-pane-width '${mainSize}%'`);
+    run(`tmux select-layout -t "${winTarget}" main-vertical`);
+  }
+
+  // Get pane IDs and send commands
+  const paneIds = getPaneIdsForWindow(sessionName, windowIndex);
+  for (let i = 0; i < panes.length && i < paneIds.length; i++) {
+    if (panes[i].cmd) {
+      run(`tmux send-keys -t "${paneIds[i]}" '${esc(panes[i].cmd)}' Enter`);
+    }
+    if (panes[i].name) {
+      runQuiet(`tmux select-pane -t "${paneIds[i]}" -T "${panes[i].name}"`);
+    }
+  }
+
+  // Focus first pane in this window
+  if (paneIds.length) {
+    run(`tmux select-pane -t "${paneIds[0]}"`);
+  }
+}
+
+/** Create a group session with one tmux window per tab */
+function createGroupSession(group) {
+  const name = toGroupSessionName(group.id);
+  const tabs = group.tabs || [];
+
+  if (!tabs.length) {
+    console.log(`Group "${group.id}" has no tabs.`);
+    return null;
+  }
+
+  // Validate all paths exist
+  for (const tab of tabs) {
+    if (!existsSync(tab.path)) {
+      console.log(`Warning: path does not exist — ${tab.path}`);
+    }
+  }
+
+  const firstDir = esc(tabs[0].path);
+  console.log(`Creating group "${group.label || group.id}" (${tabs.length} tabs)...`);
+
+  // Create session with first window
+  run(`tmux new-session -d -s "${name}" -c '${firstDir}'`);
+
+  // Set up each window/tab
+  for (let i = 0; i < tabs.length; i++) {
+    const tab = tabs[i];
+    const dir = resolve(tab.path);
+    createWindowForProject(name, i, dir, tab.label);
+  }
+
+  // Tag the session title
+  runQuiet(`tmux set-option -t "${name}" set-titles on`);
+  runQuiet(`tmux set-option -t "${name}" set-titles-string "[devmux:${name}] #{window_name} — #{pane_title}"`);
+
+  // Select first window
+  runQuiet(`tmux select-window -t "${name}:0"`);
+
+  return name;
+}
+
+function listGroups() {
+  const ws = readWorkspaceConfig();
+  if (!ws?.groups?.length) {
+    console.log("No tab groups configured in ~/.devmux/workspace.json");
+    return;
+  }
+
+  console.log("Tab Groups:\n");
+  for (const group of ws.groups) {
+    const tabs = group.tabs || [];
+    const runningCount = tabs.filter((t) => sessionExists(toSessionName(resolve(t.path)))).length;
+    const running = runningCount > 0;
+    const status = running
+      ? `\x1b[32m● ${runningCount}/${tabs.length} running\x1b[0m`
+      : "\x1b[90m○ stopped\x1b[0m";
+    const tabLabels = tabs.map((t) => t.label || basename(t.path)).join(", ");
+    console.log(`  ${group.label || group.id}  ${status}`);
+    console.log(`    id: ${group.id}`);
+    console.log(`    tabs: ${tabLabels}`);
+    console.log();
+  }
+}
+
+function groupCommand(id) {
+  const ws = readWorkspaceConfig();
+  if (!ws?.groups?.length) {
+    console.log("No tab groups configured in ~/.devmux/workspace.json");
+    return;
+  }
+
+  if (!id) {
+    listGroups();
+    return;
+  }
+
+  const group = ws.groups.find((g) => g.id === id);
+  if (!group) {
+    console.log(`No group "${id}". Available: ${ws.groups.map((g) => g.id).join(", ")}`);
+    return;
+  }
+
+  const tabs = group.tabs || [];
+  if (!tabs.length) {
+    console.log(`Group "${group.id}" has no tabs.`);
+    return;
+  }
+
+  // Each tab gets its own devmux session (individual project sessions)
+  const firstDir = resolve(tabs[0].path);
+  const firstName = toSessionName(firstDir);
+
+  // If the first tab's session already exists, just attach
+  if (sessionExists(firstName)) {
+    console.log(`Reattaching to "${group.label || group.id}" (${tabs[0].label || basename(firstDir)})...`);
+    attach(firstName);
+    return;
+  }
+
+  // Create a detached session for each tab
+  console.log(`Launching group "${group.label || group.id}" (${tabs.length} tabs)...`);
+  for (const tab of tabs) {
+    const dir = resolve(tab.path);
+    const name = toSessionName(dir);
+    if (!sessionExists(name)) {
+      console.log(`  Creating session: ${tab.label || basename(dir)}`);
+      createSession(dir);
+    }
+  }
+
+  // Attach to the first tab's session
+  attach(firstName);
+}
+
+function tabCommand(groupId, tabName) {
+  if (!groupId) {
+    console.log("Usage: devmux tab <group-id> <tab-name|index>");
+    return;
+  }
+
+  const ws = readWorkspaceConfig();
+  if (!ws?.groups?.length) {
+    console.log("No tab groups configured.");
+    return;
+  }
+
+  const group = ws.groups.find((g) => g.id === groupId);
+  if (!group) {
+    console.log(`No group "${groupId}".`);
+    return;
+  }
+
+  const tabs = group.tabs || [];
+
+  if (!tabName) {
+    // List tabs with their session status
+    console.log(`Tabs in "${group.label || group.id}":\n`);
+    for (let i = 0; i < tabs.length; i++) {
+      const label = tabs[i].label || basename(tabs[i].path);
+      const tabSession = toSessionName(resolve(tabs[i].path));
+      const running = sessionExists(tabSession);
+      const status = running ? "\x1b[32m●\x1b[0m" : "\x1b[90m○\x1b[0m";
+      console.log(`  ${status} ${i}: ${label}  (session: ${tabSession})`);
+    }
+    return;
+  }
+
+  // Resolve tab target to an index
+  let tabIdx;
+  if (/^\d+$/.test(tabName)) {
+    tabIdx = parseInt(tabName, 10);
+  } else {
+    tabIdx = tabs.findIndex(
+      (t) => (t.label || basename(t.path)).toLowerCase() === tabName.toLowerCase()
+    );
+    if (tabIdx === -1) {
+      const available = tabs.map((t) => t.label || basename(t.path)).join(", ");
+      console.log(`No tab "${tabName}". Available: ${available}`);
+      return;
+    }
+  }
+
+  if (tabIdx < 0 || tabIdx >= tabs.length) {
+    console.log(`Tab index ${tabIdx} is out of range (${tabs.length} tabs).`);
+    return;
+  }
+
+  // Each tab is its own devmux session — attach to it
+  const dir = resolve(tabs[tabIdx].path);
+  const tabSession = toSessionName(dir);
+  const label = tabs[tabIdx].label || basename(dir);
+
+  if (sessionExists(tabSession)) {
+    console.log(`Attaching to tab: ${label}`);
+    attach(tabSession);
+  } else {
+    console.log(`Creating session for tab: ${label}`);
+    createSession(dir);
+    attach(tabSession);
   }
 }
 
@@ -389,6 +663,200 @@ function restartPane(target) {
 
 // ── Commands ─────────────────────────────────────────────────────────
 
+// ── Daemon-aware commands ────────────────────────────────────────────
+
+async function daemonStatusCommand() {
+  try {
+    const { daemonCall } = await getDaemonClient();
+    const status = await daemonCall("daemon.status");
+    const uptime = Math.round(status.uptime);
+    const h = Math.floor(uptime / 3600);
+    const m = Math.floor((uptime % 3600) / 60);
+    const s = uptime % 60;
+    const uptimeStr = h > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+    console.log(`\x1b[32m●\x1b[0m Daemon running on ws://127.0.0.1:9399`);
+    console.log(`  uptime:    ${uptimeStr}`);
+    console.log(`  clients:   ${status.clientCount}`);
+    console.log(`  windows:   ${status.windowCount}`);
+    console.log(`  tmux:      ${status.tmuxSessionCount} sessions`);
+    console.log(`  version:   ${status.version}`);
+  } catch {
+    console.log("\x1b[90m○\x1b[0m Daemon not running (start with: devmux app)");
+  }
+}
+
+async function windowsCommand(jsonFlag) {
+  try {
+    const { daemonCall } = await getDaemonClient();
+    const windows = await daemonCall("windows.list");
+    if (jsonFlag) {
+      console.log(JSON.stringify(windows, null, 2));
+      return;
+    }
+    if (!windows.length) {
+      console.log("No windows tracked.");
+      return;
+    }
+    console.log(`Windows (${windows.length}):\n`);
+    for (const w of windows) {
+      const session = w.devmuxSession ? `  \x1b[36m[devmux:${w.devmuxSession}]\x1b[0m` : "";
+      const spaces = w.spaceIds.length ? ` space:${w.spaceIds.join(",")}` : "";
+      console.log(`  \x1b[1m${w.app}\x1b[0m  wid:${w.wid}${spaces}${session}`);
+      console.log(`    "${w.title}"`);
+      console.log(`    ${Math.round(w.frame.w)}×${Math.round(w.frame.h)} at (${Math.round(w.frame.x)},${Math.round(w.frame.y)})`);
+      console.log();
+    }
+  } catch {
+    console.log("Daemon not running. Start with: devmux app");
+  }
+}
+
+async function focusCommand(session) {
+  if (!session) {
+    console.log("Usage: devmux focus <session-name>");
+    return;
+  }
+  try {
+    const { daemonCall } = await getDaemonClient();
+    await daemonCall("window.focus", { session });
+    console.log(`Focused: ${session}`);
+  } catch (e) {
+    console.log(`Error: ${e.message}`);
+  }
+}
+
+async function layerCommand(index) {
+  try {
+    const { daemonCall } = await getDaemonClient();
+    if (index === undefined || index === null || index === "") {
+      const result = await daemonCall("layers.list");
+      if (!result.layers.length) {
+        console.log("No layers configured.");
+        return;
+      }
+      console.log("Layers:\n");
+      for (const layer of result.layers) {
+        const active = layer.index === result.active ? " \x1b[32m● active\x1b[0m" : "";
+        console.log(`  [${layer.index}] ${layer.label}  (${layer.projectCount} projects)${active}`);
+      }
+      return;
+    }
+    const idx = parseInt(index, 10);
+    if (isNaN(idx)) {
+      console.log("Usage: devmux layer <index>");
+      return;
+    }
+    await daemonCall("layer.switch", { index: idx });
+    console.log(`Switched to layer ${idx}`);
+  } catch (e) {
+    console.log(`Error: ${e.message}`);
+  }
+}
+
+async function daemonLsCommand() {
+  try {
+    const { daemonCall, isDaemonRunning } = await getDaemonClient();
+    if (!(await isDaemonRunning())) return false;
+    const sessions = await daemonCall("tmux.sessions");
+    if (!sessions.length) {
+      console.log("No active tmux sessions.");
+      return true;
+    }
+
+    // Annotate sessions with workspace group info
+    const ws = readWorkspaceConfig();
+    const sessionGroupMap = new Map();
+    if (ws?.groups) {
+      for (const g of ws.groups) {
+        for (const tab of g.tabs || []) {
+          const tabSession = toSessionName(resolve(tab.path));
+          sessionGroupMap.set(tabSession, {
+            group: g.label || g.id,
+            tab: tab.label || basename(tab.path),
+          });
+        }
+      }
+    }
+
+    console.log("Sessions:\n");
+    for (const s of sessions) {
+      const info = sessionGroupMap.get(s.name);
+      const groupTag = info ? `  \x1b[36m[${info.group}: ${info.tab}]\x1b[0m` : "";
+      const attachTag = s.attached ? "  \x1b[33m[attached]\x1b[0m" : "";
+      console.log(`  ${s.name}  (${s.windowCount} windows)${attachTag}${groupTag}`);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function daemonStatusInventory() {
+  try {
+    const { daemonCall, isDaemonRunning } = await getDaemonClient();
+    if (!(await isDaemonRunning())) return false;
+    const inv = await daemonCall("tmux.inventory");
+
+    // Build managed session name set
+    const managed = new Map();
+    const ws = readWorkspaceConfig();
+    if (ws?.groups) {
+      for (const g of ws.groups) {
+        for (const tab of g.tabs || []) {
+          const name = toSessionName(resolve(tab.path));
+          const label = `${g.label || g.id}: ${tab.label || basename(tab.path)}`;
+          managed.set(name, label);
+        }
+      }
+    }
+    for (const s of inv.all) {
+      if (!managed.has(s.name)) {
+        // Check if it matches a scanned project (via daemon)
+        const projects = await daemonCall("projects.list");
+        for (const p of projects) {
+          managed.set(p.sessionName, p.name);
+        }
+        break;
+      }
+    }
+
+    const managedSessions = inv.all.filter((s) => managed.has(s.name));
+    const orphanSessions = inv.orphans;
+
+    if (managedSessions.length > 0) {
+      console.log(`\x1b[32m●\x1b[0m Managed Sessions (${managedSessions.length})\n`);
+      for (const s of managedSessions) {
+        const label = managed.get(s.name) || s.name;
+        const attachTag = s.attached ? "  \x1b[33m[attached]\x1b[0m" : "";
+        console.log(`  \x1b[1m${s.name}\x1b[0m  (${s.windowCount} window${s.windowCount === 1 ? "" : "s"})${attachTag}  \x1b[36m[${label}]\x1b[0m`);
+        for (const p of s.panes) {
+          console.log(`    ${p.title || "pane"}: ${p.currentCommand}`);
+        }
+        console.log();
+      }
+    } else {
+      console.log("\x1b[90m○\x1b[0m No managed sessions running.\n");
+    }
+
+    if (orphanSessions.length > 0) {
+      console.log(`\x1b[33m○\x1b[0m Unmanaged Sessions (${orphanSessions.length})\n`);
+      for (const s of orphanSessions) {
+        const attachTag = s.attached ? "  \x1b[33m[attached]\x1b[0m" : "";
+        console.log(`  \x1b[1m${s.name}\x1b[0m  (${s.windowCount} window${s.windowCount === 1 ? "" : "s"})${attachTag}`);
+        for (const p of s.panes) {
+          console.log(`    ${p.title || "pane"}: ${p.currentCommand}`);
+        }
+        console.log();
+      }
+    } else {
+      console.log("\x1b[90m○\x1b[0m No unmanaged sessions.\n");
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function printUsage() {
   console.log(`devmux — Claude Code + dev server in tmux
 
@@ -396,9 +864,17 @@ Usage:
   devmux                    Create session (or reattach) for current project
   devmux init               Generate .devmux.json config for this project
   devmux ls                 List active tmux sessions
+  devmux status             Show managed vs unmanaged session inventory
   devmux kill [name]        Kill a session (defaults to current project)
   devmux sync               Reconcile session to match declared config
   devmux restart [pane]     Restart a pane's process (by name or index)
+  devmux group [id]         List tab groups or launch/attach a group
+  devmux groups             List all tab groups with status
+  devmux tab <group> [tab]  Switch tab within a group (by label or index)
+  devmux windows [--json]   List all desktop windows (daemon required)
+  devmux focus <session>    Focus a session's terminal window (daemon required)
+  devmux layer [index]      List layers or switch to a layer (daemon required)
+  devmux daemon status      Show daemon status
   devmux app                Launch the menu bar companion app
   devmux app build          Rebuild the menu bar app
   devmux app restart        Rebuild and relaunch the menu bar app
@@ -475,8 +951,32 @@ function listSessions() {
     console.log("No active tmux sessions.");
     return;
   }
+
+  // Annotate sessions that belong to tab groups
+  const ws = readWorkspaceConfig();
+  const sessionGroupMap = new Map();
+  if (ws?.groups) {
+    for (const g of ws.groups) {
+      for (const tab of g.tabs || []) {
+        const tabSession = toSessionName(resolve(tab.path));
+        sessionGroupMap.set(tabSession, {
+          group: g.label || g.id,
+          tab: tab.label || basename(tab.path),
+        });
+      }
+    }
+  }
+
+  const lines = out.split("\n").map((line) => {
+    const sessionName = line.split("  ")[0];
+    const info = sessionGroupMap.get(sessionName);
+    return info
+      ? `${line}  \x1b[36m[${info.group}: ${info.tab}]\x1b[0m`
+      : line;
+  });
+
   console.log("Sessions:\n");
-  console.log(out);
+  console.log(lines.join("\n"));
 }
 
 function killSession(name) {
@@ -579,6 +1079,110 @@ function attach(name) {
   }
 }
 
+// ── Status / Inventory ───────────────────────────────────────────────
+
+function statusInventory() {
+  // Query all tmux sessions
+  const sessionsRaw = runQuiet(
+    'tmux list-sessions -F "#{session_name}\t#{session_windows}\t#{session_attached}"'
+  );
+  if (!sessionsRaw) {
+    console.log("No active tmux sessions.");
+    return;
+  }
+
+  // Query all panes
+  const panesRaw = runQuiet(
+    'tmux list-panes -a -F "#{session_name}\t#{pane_title}\t#{pane_current_command}"'
+  );
+
+  // Parse panes grouped by session
+  const panesBySession = new Map();
+  if (panesRaw) {
+    for (const line of panesRaw.split("\n").filter(Boolean)) {
+      const [sess, title, cmd] = line.split("\t");
+      if (!panesBySession.has(sess)) panesBySession.set(sess, []);
+      panesBySession.get(sess).push({ title, cmd });
+    }
+  }
+
+  // Build managed session name set
+  const managed = new Map(); // name -> label
+
+  // From workspace groups
+  const ws = readWorkspaceConfig();
+  if (ws?.groups) {
+    for (const g of ws.groups) {
+      for (const tab of g.tabs || []) {
+        const name = toSessionName(resolve(tab.path));
+        const label = `${g.label || g.id}: ${tab.label || basename(tab.path)}`;
+        managed.set(name, label);
+      }
+    }
+  }
+
+  // From scanning .devmux.json files
+  const scanRoot =
+    process.env.DEVMUX_SCAN_ROOT ||
+    resolve(homedir(), "dev");
+  const findResult = runQuiet(
+    `find "${scanRoot}" -name .devmux.json -maxdepth 3 -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null`
+  );
+  if (findResult) {
+    for (const configPath of findResult.split("\n").filter(Boolean)) {
+      const dir = resolve(configPath, "..");
+      const name = toSessionName(dir);
+      if (!managed.has(name)) {
+        managed.set(name, basename(dir));
+      }
+    }
+  }
+
+  // Parse sessions and classify
+  const sessions = sessionsRaw.split("\n").filter(Boolean).map((line) => {
+    const [name, windows, attached] = line.split("\t");
+    return { name, windows: parseInt(windows) || 1, attached: attached !== "0" };
+  });
+
+  const managedSessions = sessions.filter((s) => managed.has(s.name));
+  const orphanSessions = sessions.filter((s) => !managed.has(s.name));
+
+  // Print managed
+  if (managedSessions.length > 0) {
+    console.log(`\x1b[32m●\x1b[0m Managed Sessions (${managedSessions.length})\n`);
+    for (const s of managedSessions) {
+      const label = managed.get(s.name);
+      const attachTag = s.attached ? "  \x1b[33m[attached]\x1b[0m" : "";
+      console.log(`  \x1b[1m${s.name}\x1b[0m  (${s.windows} window${s.windows === 1 ? "" : "s"})${attachTag}  \x1b[36m[${label}]\x1b[0m`);
+      const panes = panesBySession.get(s.name) || [];
+      for (const p of panes) {
+        const name = p.title || "pane";
+        console.log(`    ${name}: ${p.cmd}`);
+      }
+      console.log();
+    }
+  } else {
+    console.log("\x1b[90m○\x1b[0m No managed sessions running.\n");
+  }
+
+  // Print orphans
+  if (orphanSessions.length > 0) {
+    console.log(`\x1b[33m○\x1b[0m Unmanaged Sessions (${orphanSessions.length})\n`);
+    for (const s of orphanSessions) {
+      const attachTag = s.attached ? "  \x1b[33m[attached]\x1b[0m" : "";
+      console.log(`  \x1b[1m${s.name}\x1b[0m  (${s.windows} window${s.windows === 1 ? "" : "s"})${attachTag}`);
+      const panes = panesBySession.get(s.name) || [];
+      for (const p of panes) {
+        const name = p.title || "pane";
+        console.log(`    ${name}: ${p.cmd}`);
+      }
+      console.log();
+    }
+  } else {
+    console.log("\x1b[90m○\x1b[0m No unmanaged sessions.\n");
+  }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 if (!hasTmux()) {
@@ -592,7 +1196,10 @@ switch (command) {
     break;
   case "ls":
   case "list":
-    listSessions();
+    // Try daemon first, fall back to direct tmux
+    if (!(await daemonLsCommand())) {
+      listSessions();
+    }
     break;
   case "kill":
   case "rm":
@@ -606,6 +1213,22 @@ switch (command) {
   case "respawn":
     restartPane(args[1]);
     break;
+  case "group":
+    groupCommand(args[1]);
+    break;
+  case "groups":
+    listGroups();
+    break;
+  case "tab":
+    tabCommand(args[1], args[2]);
+    break;
+  case "status":
+  case "inventory":
+    // Try daemon first, fall back to direct tmux
+    if (!(await daemonStatusInventory())) {
+      statusInventory();
+    }
+    break;
   case "tile":
   case "t":
     if (args[1]) {
@@ -616,13 +1239,28 @@ switch (command) {
       console.log("           bottom-left, bottom-right, maximize, center");
     }
     break;
+  case "windows":
+    await windowsCommand(args[1] === "--json");
+    break;
+  case "focus":
+    await focusCommand(args[1]);
+    break;
+  case "layer":
+  case "layers":
+    await layerCommand(args[1]);
+    break;
+  case "daemon":
+    if (args[1] === "status") {
+      await daemonStatusCommand();
+    } else {
+      console.log("Usage: devmux daemon status");
+    }
+    break;
   case "app": {
     // Forward to devmux-app script
     const { execFileSync } = await import("node:child_process");
-    const { dirname, resolve } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const appScript = resolve(__dirname, "devmux-app.js");
+    const __dirname2 = dirname(fileURLToPath(import.meta.url));
+    const appScript = resolve(__dirname2, "devmux-app.js");
     try {
       execFileSync("node", [appScript, ...args.slice(1)], { stdio: "inherit" });
     } catch { /* exit code forwarded */ }

@@ -12,11 +12,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             CommandPaletteWindow.shared.toggle()
         }
 
+        // Register command mode hotkey (Hyper+1)
+        HotkeyManager.shared.registerCommandMode {
+            CommandModeWindow.shared.toggle()
+        }
+
         // Register layer-switching hotkeys (Cmd+Option+1/2/3...)
         let workspace = WorkspaceManager.shared
         if let config = workspace.config {
-            HotkeyManager.shared.registerLayerHotkeys(count: config.layers.count) { index in
-                workspace.switchToLayer(index: index)
+            HotkeyManager.shared.registerLayerHotkeys(count: (config.layers ?? []).count) { index in
+                workspace.focusLayer(index: index)
             }
         }
 
@@ -32,6 +37,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Check macOS permissions (Accessibility, Screen Recording)
         PermissionChecker.shared.check()
+
+        // Start daemon services
+        DesktopModel.shared.start()
+        TmuxModel.shared.start()
+        DaemonServer.shared.start()
 
         // --diagnostics flag: auto-open diagnostics panel on launch
         if CommandLine.arguments.contains("--diagnostics") {

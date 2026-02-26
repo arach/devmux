@@ -68,6 +68,27 @@ class HotkeyManager {
         if let ref { hotKeyRefs[id] = ref }
     }
 
+    /// Register Hyper+1 (Cmd+Ctrl+Option+Shift+1) for command mode
+    func registerCommandMode(callback: @escaping () -> Void) {
+        ensureEventHandler()
+        let id: UInt32 = 200
+        hotkeyCallbacks[id] = callback
+        let hotKeyID = EventHotKeyID(
+            signature: OSType(0x444D5558),  // "DMUX"
+            id: id
+        )
+        var ref: EventHotKeyRef?
+        RegisterEventHotKey(
+            18,  // '1' key
+            UInt32(cmdKey | controlKey | optionKey | shiftKey),  // Hyper
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+        if let ref { hotKeyRefs[id] = ref }
+    }
+
     /// Register Cmd+Option+1/2/3... hotkeys for layer switching
     func registerLayerHotkeys(count: Int, callback: @escaping (Int) -> Void) {
         ensureEventHandler()

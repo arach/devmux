@@ -100,6 +100,79 @@ enum Terminal: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Launch a command in a new tab of the current terminal window
+    func launchTab(command: String, in directory: String, tabName: String? = nil) {
+        let dir = directory.replacingOccurrences(of: "'", with: "'\\''")
+        let cmd = command.replacingOccurrences(of: "'", with: "'\\''")
+        let fullCmd = "cd '\(dir)' && \(cmd)"
+
+        switch self {
+        case .iterm2:
+            var lines = [
+                "tell application \"iTerm2\"",
+                "activate",
+                "if (count of windows) = 0 then",
+                "  create window with default profile",
+                "else",
+                "  tell current window to create tab with default profile",
+                "end if",
+                "tell current session of current tab of current window",
+                "  write text \"\(fullCmd)\"",
+            ]
+            if let name = tabName {
+                let escaped = name.replacingOccurrences(of: "\"", with: "\\\"")
+                lines.append("  set name to \"\(escaped)\"")
+            }
+            lines.append("end tell")
+            lines.append("end tell")
+            runOsascriptLines(lines)
+
+        case .terminal:
+            var lines = [
+                "tell application \"Terminal\"",
+                "activate",
+                "if (count of windows) = 0 then",
+                "  do script \"\(fullCmd)\"",
+                "else",
+                "  do script \"\(fullCmd)\" in front window",
+                "end if",
+            ]
+            if let name = tabName {
+                let escaped = name.replacingOccurrences(of: "\"", with: "\\\"")
+                lines.append("set custom title of selected tab of front window to \"\(escaped)\"")
+            }
+            lines.append("end tell")
+            runOsascriptLines(lines)
+
+        default:
+            // Terminals without AppleScript tab support: fall back to new window
+            launch(command: command, in: directory)
+        }
+    }
+
+    /// Rename the current/frontmost tab in this terminal
+    func nameTab(_ name: String) {
+        let escaped = name.replacingOccurrences(of: "\"", with: "\\\"")
+        switch self {
+        case .iterm2:
+            runOsascript(
+                "tell application \"iTerm2\"",
+                "tell current session of current tab of current window",
+                "set name to \"\(escaped)\"",
+                "end tell",
+                "end tell"
+            )
+        case .terminal:
+            runOsascript(
+                "tell application \"Terminal\"",
+                "set custom title of selected tab of front window to \"\(escaped)\"",
+                "end tell"
+            )
+        default:
+            break
+        }
+    }
+
     /// The tag we put in the terminal window title via tmux set-titles
     static func windowTag(for session: String) -> String {
         "[devmux:\(session)]"
@@ -127,20 +200,32 @@ enum Terminal: String, CaseIterable, Identifiable {
             )
 
         case .iterm2:
+            // Search through all sessions in all tabs of all windows
             runOsascript(
                 "tell application \"iTerm2\"",
                 "activate",
                 "set found to false",
                 "repeat with w in windows",
-                "  if name of w contains \"\(tag)\" then",
-                "    select w",
-                "    set found to true",
-                "    exit repeat",
-                "  end if",
+                "  repeat with t in tabs of w",
+                "    repeat with s in sessions of t",
+                "      if name of s contains \"\(tag)\" then",
+                "        select w",
+                "        tell w to set current tab to t",
+                "        set found to true",
+                "        exit repeat",
+                "      end if",
+                "    end repeat",
+                "    if found then exit repeat",
+                "  end repeat",
+                "  if found then exit repeat",
                 "end repeat",
                 "if not found then",
-                "  set newWindow to (create window with default profile)",
-                "  tell current session of newWindow",
+                "  if (count of windows) = 0 then",
+                "    create window with default profile",
+                "  else",
+                "    tell current window to create tab with default profile",
+                "  end if",
+                "  tell current session of current tab of current window",
                 "    write text \"tmux attach -t \(session)\"",
                 "  end tell",
                 "end if",
@@ -159,6 +244,11 @@ enum Terminal: String, CaseIterable, Identifiable {
 
 /// Run an AppleScript by joining lines into a single -e script block
 private func runOsascript(_ lines: String...) {
+    runOsascriptLines(lines)
+}
+
+/// Run an AppleScript from an array of lines
+private func runOsascriptLines(_ lines: [String]) {
     let script = lines.joined(separator: "\n")
     let task = Process()
     task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")

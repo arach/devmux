@@ -5,12 +5,21 @@ struct MainView: View {
     @StateObject private var prefs = Preferences.shared
     @StateObject private var permChecker = PermissionChecker.shared
     @ObservedObject private var workspace = WorkspaceManager.shared
+    @StateObject private var inventory = InventoryManager.shared
     @State private var searchText = ""
     @State private var hasCheckedSetup = false
     @State private var bannerDismissed = false
+    @State private var orphanSectionCollapsed = true
     private var filtered: [Project] {
         if searchText.isEmpty { return scanner.projects }
         return scanner.projects.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    private var filteredOrphans: [TmuxSession] {
+        if searchText.isEmpty { return inventory.orphans }
+        return inventory.orphans.filter {
             $0.name.localizedCaseInsensitiveContains(searchText)
         }
     }
@@ -22,7 +31,7 @@ struct MainView: View {
         VStack(spacing: 0) {
             mainContent
         }
-        .frame(width: 380, height: 460)
+        .frame(minWidth: 380, idealWidth: 380, maxWidth: 600, minHeight: 460, idealHeight: 460, maxHeight: .infinity)
         .background(PanelBackground())
         .preferredColorScheme(.dark)
         .onAppear {
@@ -32,6 +41,7 @@ struct MainView: View {
             }
             scanner.updateRoot(prefs.scanRoot)
             scanner.scan()
+            inventory.refresh()
             permChecker.check()
             bannerDismissed = false
         }
@@ -45,8 +55,9 @@ struct MainView: View {
                     .font(Typo.title())
                     .foregroundColor(Palette.text)
 
-                if runningCount > 0 {
-                    Text("\(runningCount) session\(runningCount == 1 ? "" : "s")")
+                if runningCount > 0 || !inventory.orphans.isEmpty {
+                    let total = runningCount + inventory.orphans.count
+                    Text("\(total) session\(total == 1 ? "" : "s")")
                         .font(Typo.mono(10))
                         .foregroundColor(Palette.running)
                         .padding(.leading, 4)
@@ -55,16 +66,26 @@ struct MainView: View {
                 Spacer()
 
                 headerButton(icon: "arrow.up.left.and.arrow.down.right") {
+                    // Dismiss the MenuBarExtra panel immediately
+                    for window in NSApp.windows {
+                        if window is NSPanel, window.isVisible,
+                           !CommandPaletteWindow.shared.isVisible || window.frame.width < 500 {
+                            // MenuBarExtra panels are small (~380px); command palette is 540px
+                            if window.frame.width <= 400 {
+                                window.orderOut(nil)
+                            }
+                        }
+                    }
                     MainWindow.shared.show()
                 }
-                headerButton(icon: "arrow.clockwise") { scanner.scan() }
+                headerButton(icon: "arrow.clockwise") { scanner.scan(); inventory.refresh() }
             }
             .padding(.horizontal, 18)
             .padding(.top, 14)
             .padding(.bottom, 10)
 
             // Layer switcher
-            if let config = workspace.config, config.layers.count > 1 {
+            if let config = workspace.config, let layers = config.layers, layers.count > 1 {
                 layerBar(config: config)
             }
 
@@ -105,13 +126,28 @@ struct MainView: View {
                 .frame(height: 0.5)
 
             // List
-            if filtered.isEmpty {
+            if filtered.isEmpty && (workspace.config?.groups ?? []).isEmpty {
                 Spacer()
                 emptyState
                 Spacer()
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
+                        // Tab groups section
+                        if let groups = workspace.config?.groups, !groups.isEmpty, searchText.isEmpty {
+                            ForEach(groups) { group in
+                                TabGroupRow(group: group, workspace: workspace)
+                            }
+
+                            if !filtered.isEmpty {
+                                Rectangle()
+                                    .fill(Palette.border)
+                                    .frame(height: 0.5)
+                                    .padding(.vertical, 4)
+                            }
+                        }
+
+                        // Projects
                         ForEach(filtered) { project in
                             ProjectRow(project: project) {
                                 SessionManager.launch(project: project)
@@ -134,6 +170,11 @@ struct MainView: View {
                                 SessionManager.restart(project: project, paneName: paneName)
                             }
                         }
+
+                        // Orphan sessions
+                        if !filteredOrphans.isEmpty {
+                            orphanSection
+                        }
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
@@ -146,6 +187,64 @@ struct MainView: View {
 
             // Status bar
             statusBar
+        }
+    }
+
+    // MARK: - Orphan section
+
+    private var orphanSection: some View {
+        VStack(spacing: 4) {
+            Rectangle()
+                .fill(Palette.border)
+                .frame(height: 0.5)
+                .padding(.vertical, 4)
+
+            // Section header
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { orphanSectionCollapsed.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: orphanSectionCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(Palette.textMuted)
+
+                    Text("Unmanaged Sessions")
+                        .font(Typo.caption(10))
+                        .foregroundColor(Palette.textMuted)
+
+                    Text("\(filteredOrphans.count)")
+                        .font(Typo.mono(9))
+                        .foregroundColor(Palette.detach)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Palette.detach.opacity(0.12))
+                        )
+
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 4)
+
+            if !orphanSectionCollapsed {
+                ForEach(filteredOrphans) { session in
+                    OrphanRow(
+                        session: session,
+                        onAttach: {
+                            let terminal = Preferences.shared.terminal
+                            terminal.focusOrAttach(session: session.name)
+                        },
+                        onKill: {
+                            SessionManager.killByName(session.name)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                inventory.refresh()
+                            }
+                        }
+                    )
+                }
+            }
         }
     }
 
@@ -345,10 +444,11 @@ struct MainView: View {
 
     private func layerBar(config: WorkspaceConfig) -> some View {
         HStack(spacing: 6) {
-            ForEach(Array(config.layers.enumerated()), id: \.element.id) { i, layer in
+            ForEach(Array((config.layers ?? []).enumerated()), id: \.element.id) { i, layer in
                 let isActive = i == workspace.activeLayerIndex
+                let counts = workspace.layerRunningCount(index: i)
                 Button {
-                    workspace.switchToLayer(index: i)
+                    workspace.focusLayer(index: i)
                 } label: {
                     VStack(spacing: 2) {
                         HStack(spacing: 5) {
@@ -358,6 +458,11 @@ struct MainView: View {
                             Text(layer.label)
                                 .font(Typo.mono(11))
                                 .foregroundColor(isActive ? Palette.text : Palette.textDim)
+                            if counts.total > 0 {
+                                Text("\(counts.running)/\(counts.total)")
+                                    .font(Typo.mono(8))
+                                    .foregroundColor(counts.running > 0 ? Palette.running : Palette.textMuted)
+                            }
                         }
                         Text("\u{2325}\(i + 1)")
                             .font(Typo.mono(8))

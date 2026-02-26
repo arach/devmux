@@ -100,15 +100,50 @@ Features:
 
 The app tries to compile from source first (requires Xcode CLI tools), falling back to a pre-built arm64 binary from GitHub releases.
 
+## Tab groups
+
+Bundle related projects as tabs within a single terminal window.
+Configure in `~/.devmux/workspace.json`:
+
+```json
+{
+  "name": "my-setup",
+  "groups": [
+    {
+      "id": "talkie",
+      "label": "Talkie",
+      "tabs": [
+        { "path": "/Users/you/dev/talkie-ios", "label": "iOS" },
+        { "path": "/Users/you/dev/talkie-web", "label": "Website" },
+        { "path": "/Users/you/dev/talkie-api", "label": "API" }
+      ]
+    }
+  ]
+}
+```
+
+Each tab gets its own tmux window with pane layout from its `.devmux.json`.
+
+```sh
+devmux groups            # List groups with status
+devmux group talkie      # Launch or attach
+devmux tab talkie iOS    # Switch to a tab
+```
+
+Groups can also be referenced in [workspace layers](https://devmux.dev/docs/layers) to tile a whole group into a screen position.
+
 ## CLI reference
 
 ```
-devmux              Create or reattach to a session for the current project
-devmux init         Generate a .devmux.json config
-devmux ls           List active tmux sessions
-devmux kill [name]  Kill a session (defaults to current project)
-devmux app          Launch the menu bar companion app
-devmux help         Show help
+devmux                    Create or reattach to a session for the current project
+devmux init               Generate a .devmux.json config
+devmux ls                 List active tmux sessions
+devmux kill [name]        Kill a session (defaults to current project)
+devmux group [id]         List tab groups or launch/attach a group
+devmux groups             List all tab groups with status
+devmux tab <group> [tab]  Switch tab within a group (by label or index)
+devmux app                Launch the menu bar companion app
+devmux help               Show help
 ```
 
 ## Requirements

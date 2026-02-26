@@ -905,6 +905,11 @@ enum WindowTiler {
         diag.success("tileWindowById: tiled wid=\(wid) to \(position.rawValue)")
     }
 
+    /// Distribute windows in a smart grid layout (delegates to batch operation)
+    static func tileDistributeHorizontally(windows: [(wid: UInt32, pid: Int32)]) {
+        batchRaiseAndDistribute(windows: windows)
+    }
+
     /// Get NSRect (bottom-left origin) for a known CG window ID
     private static func cgWindowFrame(wid: UInt32) -> NSRect? {
         guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
@@ -942,6 +947,452 @@ enum WindowTiler {
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.activate()
         }
+    }
+
+    /// Raise multiple windows at once, re-activating our app once at the end
+    static func raiseWindowsAndReactivate(windows: [(wid: UInt32, pid: Int32)]) {
+        let diag = DiagnosticLog.shared
+        var activatedPids = Set<Int32>()
+        for win in windows {
+            if let axWindow = findAXWindowByFrame(wid: win.wid, pid: win.pid) {
+                AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+            }
+            if !activatedPids.contains(win.pid) {
+                if let app = NSRunningApplication(processIdentifier: win.pid) {
+                    app.activate()
+                    activatedPids.insert(win.pid)
+                }
+            }
+        }
+        diag.success("raiseWindowsAndReactivate: raised \(windows.count) windows")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Raise a window to front and then re-activate our own app so the panel stays visible
+    static func raiseWindowAndReactivate(wid: UInt32, pid: Int32) {
+        let diag = DiagnosticLog.shared
+        diag.info("raiseWindowAndReactivate: wid=\(wid) pid=\(pid)")
+
+        // Switch to window's space if needed
+        let windowSpaces = getSpacesForWindow(wid)
+        let currentSpace = getCurrentSpace()
+
+        let doRaise = {
+            if let axWindow = findAXWindowByFrame(wid: wid, pid: pid) {
+                AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+                diag.success("raiseWindowAndReactivate: raised wid=\(wid)")
+            }
+            // Activate target app briefly so window comes to front
+            if let app = NSRunningApplication(processIdentifier: pid) {
+                app.activate()
+            }
+            // Re-activate our app so the panel stays visible
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+
+        if let windowSpace = windowSpaces.first, windowSpace != currentSpace {
+            diag.info("Switching from space \(currentSpace) → \(windowSpace)")
+            switchToSpace(spaceId: windowSpace)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { doRaise() }
+        } else {
+            doRaise()
+        }
+    }
+
+    // MARK: - Batch Window Operations
+
+    /// Move multiple windows to target frames in one shot.
+    /// Single CGWindowList query, single AX query per process, all moves synchronous.
+    static func batchMoveWindows(_ moves: [(wid: UInt32, pid: Int32, frame: CGRect)]) {
+        guard !moves.isEmpty else { return }
+        let diag = DiagnosticLog.shared
+
+        // 1. Single CG query to get all window frames
+        guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
+
+        var cgFrames: [UInt32: CGRect] = [:]
+        for info in windowList {
+            guard let num = info[kCGWindowNumber as String] as? UInt32,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary else { continue }
+            var rect = CGRect.zero
+            if CGRectMakeWithDictionaryRepresentation(dict, &rect) {
+                cgFrames[num] = rect
+            }
+        }
+
+        // 2. Group by pid so we query each app's AX windows once
+        var byPid: [Int32: [(wid: UInt32, target: CGRect)]] = [:]
+        for move in moves {
+            byPid[move.pid, default: []].append((wid: move.wid, target: move.frame))
+        }
+
+        // 3. For each process: get AX windows once, match by frame, set new position+size
+        var moved = 0
+        for (pid, windowMoves) in byPid {
+            let appRef = AXUIElementCreateApplication(pid)
+            var windowsRef: CFTypeRef?
+            let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
+            guard err == .success, let axWindows = windowsRef as? [AXUIElement] else { continue }
+
+            // Cache AX window frames
+            struct AXWinInfo { let element: AXUIElement; let pos: CGPoint; let size: CGSize }
+            var axInfos: [AXWinInfo] = []
+            for axWin in axWindows {
+                var posRef: CFTypeRef?
+                var sizeRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axWin, kAXPositionAttribute as CFString, &posRef)
+                AXUIElementCopyAttributeValue(axWin, kAXSizeAttribute as CFString, &sizeRef)
+                guard let pv = posRef, let sv = sizeRef else { continue }
+                var pos = CGPoint.zero; var size = CGSize.zero
+                AXValueGetValue(pv as! AXValue, .cgPoint, &pos)
+                AXValueGetValue(sv as! AXValue, .cgSize, &size)
+                axInfos.append(AXWinInfo(element: axWin, pos: pos, size: size))
+            }
+
+            for wm in windowMoves {
+                guard let cgRect = cgFrames[wm.wid] else { continue }
+                // Match CG frame to AX window
+                guard let axInfo = axInfos.first(where: {
+                    abs(cgRect.origin.x - $0.pos.x) < 2 && abs(cgRect.origin.y - $0.pos.y) < 2 &&
+                    abs(cgRect.width - $0.size.width) < 2 && abs(cgRect.height - $0.size.height) < 2
+                }) else { continue }
+
+                var newPos = CGPoint(x: wm.target.origin.x, y: wm.target.origin.y)
+                var newSize = CGSize(width: wm.target.width, height: wm.target.height)
+                if let pv = AXValueCreate(.cgPoint, &newPos) {
+                    AXUIElementSetAttributeValue(axInfo.element, kAXPositionAttribute as CFString, pv)
+                }
+                if let sv = AXValueCreate(.cgSize, &newSize) {
+                    AXUIElementSetAttributeValue(axInfo.element, kAXSizeAttribute as CFString, sv)
+                }
+                moved += 1
+            }
+        }
+        diag.success("batchMoveWindows: moved \(moved)/\(moves.count) windows")
+    }
+
+    /// Move AND raise windows in a single CG+AX pass (avoids duplicate lookups).
+    /// Does not reactivate devmux at the end — caller controls that.
+    static func batchMoveAndRaiseWindows(_ moves: [(wid: UInt32, pid: Int32, frame: CGRect)]) {
+        guard !moves.isEmpty else { return }
+        let diag = DiagnosticLog.shared
+
+        guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
+
+        var cgFrames: [UInt32: CGRect] = [:]
+        for info in windowList {
+            guard let num = info[kCGWindowNumber as String] as? UInt32,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary else { continue }
+            var rect = CGRect.zero
+            if CGRectMakeWithDictionaryRepresentation(dict, &rect) {
+                cgFrames[num] = rect
+            }
+        }
+
+        var byPid: [Int32: [(wid: UInt32, target: CGRect)]] = [:]
+        for move in moves {
+            byPid[move.pid, default: []].append((wid: move.wid, target: move.frame))
+        }
+
+        var processed = 0
+        var activatedPids = Set<Int32>()
+
+        for (pid, windowMoves) in byPid {
+            let appRef = AXUIElementCreateApplication(pid)
+            var windowsRef: CFTypeRef?
+            let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
+            guard err == .success, let axWindows = windowsRef as? [AXUIElement] else { continue }
+
+            struct AXWinInfo { let element: AXUIElement; let pos: CGPoint; let size: CGSize }
+            var axInfos: [AXWinInfo] = []
+            for axWin in axWindows {
+                var posRef: CFTypeRef?; var sizeRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axWin, kAXPositionAttribute as CFString, &posRef)
+                AXUIElementCopyAttributeValue(axWin, kAXSizeAttribute as CFString, &sizeRef)
+                guard let pv = posRef, let sv = sizeRef else { continue }
+                var pos = CGPoint.zero; var size = CGSize.zero
+                AXValueGetValue(pv as! AXValue, .cgPoint, &pos)
+                AXValueGetValue(sv as! AXValue, .cgSize, &size)
+                axInfos.append(AXWinInfo(element: axWin, pos: pos, size: size))
+            }
+
+            for wm in windowMoves {
+                guard let cgRect = cgFrames[wm.wid] else { continue }
+                guard let axInfo = axInfos.first(where: {
+                    abs(cgRect.origin.x - $0.pos.x) < 2 && abs(cgRect.origin.y - $0.pos.y) < 2 &&
+                    abs(cgRect.width - $0.size.width) < 2 && abs(cgRect.height - $0.size.height) < 2
+                }) else { continue }
+
+                // Move
+                var newPos = CGPoint(x: wm.target.origin.x, y: wm.target.origin.y)
+                var newSize = CGSize(width: wm.target.width, height: wm.target.height)
+                if let pv = AXValueCreate(.cgPoint, &newPos) {
+                    AXUIElementSetAttributeValue(axInfo.element, kAXPositionAttribute as CFString, pv)
+                }
+                if let sv = AXValueCreate(.cgSize, &newSize) {
+                    AXUIElementSetAttributeValue(axInfo.element, kAXSizeAttribute as CFString, sv)
+                }
+
+                // Raise
+                AXUIElementPerformAction(axInfo.element, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(axInfo.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+
+                processed += 1
+            }
+
+            // Activate each app once so its windows come to front
+            if !activatedPids.contains(pid) {
+                if let app = NSRunningApplication(processIdentifier: pid) {
+                    app.activate()
+                    activatedPids.insert(pid)
+                }
+            }
+        }
+        diag.success("batchMoveAndRaiseWindows: processed \(processed)/\(moves.count) windows")
+    }
+
+    // MARK: - Grid Layout Strategy
+
+    /// Optimal grid shapes for common window counts.
+    /// Returns array of column counts per row (top row first).
+    /// e.g. 5 → [3, 2] means 3 on top row, 2 on bottom row.
+    static func gridShape(for count: Int) -> [Int] {
+        switch count {
+        case 1:  return [1]
+        case 2:  return [2]
+        case 3:  return [3]
+        case 4:  return [2, 2]
+        case 5:  return [3, 2]
+        case 6:  return [3, 3]
+        case 7:  return [4, 3]
+        case 8:  return [4, 4]
+        case 9:  return [3, 3, 3]
+        case 10: return [5, 5]
+        case 11: return [4, 4, 3]
+        case 12: return [4, 4, 4]
+        default:
+            // General: bias toward more columns (landscape screens)
+            let cols = Int(ceil(sqrt(Double(count) * 1.5)))
+            var rows: [Int] = []
+            var remaining = count
+            while remaining > 0 {
+                rows.append(min(cols, remaining))
+                remaining -= cols
+            }
+            return rows
+        }
+    }
+
+    /// Compute grid slot rects in AX coordinates (top-left origin) for N windows
+    static func computeGridSlots(count: Int, screen: NSScreen) -> [CGRect] {
+        guard count > 0 else { return [] }
+        let visible = screen.visibleFrame
+        guard let primaryScreen = NSScreen.screens.first else { return [] }
+        let primaryHeight = primaryScreen.frame.height
+
+        // AX Y of visible top edge
+        let axTop = primaryHeight - visible.maxY
+        let shape = gridShape(for: count)
+        let rowCount = shape.count
+        let rowH = visible.height / CGFloat(rowCount)
+
+        var slots: [CGRect] = []
+        for (row, cols) in shape.enumerated() {
+            let colW = visible.width / CGFloat(cols)
+            let axY = axTop + CGFloat(row) * rowH
+            for col in 0..<cols {
+                let x = visible.origin.x + CGFloat(col) * colW
+                slots.append(CGRect(x: x, y: axY, width: colW, height: rowH))
+            }
+        }
+        return slots
+    }
+
+    /// Raise multiple windows and arrange in smart grid — single CG query, single AX query per process
+    static func batchRaiseAndDistribute(windows: [(wid: UInt32, pid: Int32)]) {
+        guard !windows.isEmpty else { return }
+        let diag = DiagnosticLog.shared
+
+        // Find screen from first window
+        guard let firstFrame = cgWindowFrame(wid: windows[0].wid) else {
+            diag.warn("batchRaiseAndDistribute: no frame for first window wid=\(windows[0].wid)")
+            return
+        }
+        let screen = NSScreen.screens.first(where: {
+            $0.frame.contains(NSPoint(x: firstFrame.midX, y: firstFrame.midY))
+        }) ?? NSScreen.main ?? NSScreen.screens[0]
+
+        let visible = screen.visibleFrame
+        let screenFrame = screen.frame
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        let shape = gridShape(for: windows.count)
+        let desc = shape.map(String.init).joined(separator: "+")
+
+        diag.info("Grid layout: \(windows.count) windows → [\(desc)]")
+        diag.info("  Screen: \(screen.localizedName) \(Int(screenFrame.width))x\(Int(screenFrame.height))")
+        diag.info("  Visible: origin=(\(Int(visible.origin.x)),\(Int(visible.origin.y))) size=\(Int(visible.width))x\(Int(visible.height))")
+        diag.info("  Primary height: \(Int(primaryHeight))")
+
+        // Pre-compute all target slots
+        let slots = computeGridSlots(count: windows.count, screen: screen)
+        guard slots.count == windows.count else {
+            diag.warn("  Slot count mismatch: \(slots.count) slots for \(windows.count) windows")
+            return
+        }
+
+        for (i, slot) in slots.enumerated() {
+            diag.info("  Slot \(i): x=\(Int(slot.origin.x)) y=\(Int(slot.origin.y)) w=\(Int(slot.width)) h=\(Int(slot.height))")
+        }
+
+        // Single CG query for frame lookup
+        let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        var cgFrames: [UInt32: CGRect] = [:]
+        var cgNames: [UInt32: String] = [:]
+        for info in windowList {
+            guard let num = info[kCGWindowNumber as String] as? UInt32,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary else { continue }
+            var rect = CGRect.zero
+            if CGRectMakeWithDictionaryRepresentation(dict, &rect) { cgFrames[num] = rect }
+            cgNames[num] = info[kCGWindowOwnerName as String] as? String
+        }
+
+        // Log before frames
+        for (i, win) in windows.enumerated() {
+            let app = cgNames[win.wid] ?? "?"
+            if let cg = cgFrames[win.wid] {
+                diag.info("  Before[\(i)] wid=\(win.wid) \(app): x=\(Int(cg.origin.x)) y=\(Int(cg.origin.y)) w=\(Int(cg.width)) h=\(Int(cg.height))")
+            } else {
+                diag.warn("  Before[\(i)] wid=\(win.wid) \(app): NO CG FRAME")
+            }
+        }
+
+        // Group by pid for AX queries, keep slot mapping
+        var widToSlot: [UInt32: Int] = [:]
+        for (i, win) in windows.enumerated() { widToSlot[win.wid] = i }
+
+        var byPid: [Int32: [(wid: UInt32, target: CGRect)]] = [:]
+        for (i, win) in windows.enumerated() {
+            byPid[win.pid, default: []].append((wid: win.wid, target: slots[i]))
+        }
+
+        struct AXWin { let el: AXUIElement; let pos: CGPoint; let size: CGSize }
+
+        // Pass 1: Move all windows to target positions (no raise yet)
+        var moved = 0
+        var failed: [UInt32] = []
+        var resolvedAXElements: [(slotIdx: Int, el: AXUIElement)] = [] // for raise pass
+
+        for (pid, windowMoves) in byPid {
+            let appRef = AXUIElementCreateApplication(pid)
+            var windowsRef: CFTypeRef?
+            let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
+            guard err == .success, let axWindows = windowsRef as? [AXUIElement] else {
+                diag.warn("  AX query failed for pid=\(pid) err=\(err.rawValue)")
+                failed.append(contentsOf: windowMoves.map(\.wid))
+                continue
+            }
+
+            var axCache: [AXWin] = []
+            for axWin in axWindows {
+                var posRef: CFTypeRef?; var sizeRef: CFTypeRef?
+                AXUIElementCopyAttributeValue(axWin, kAXPositionAttribute as CFString, &posRef)
+                AXUIElementCopyAttributeValue(axWin, kAXSizeAttribute as CFString, &sizeRef)
+                guard let pv = posRef, let sv = sizeRef else { continue }
+                var pos = CGPoint.zero; var size = CGSize.zero
+                AXValueGetValue(pv as! AXValue, .cgPoint, &pos)
+                AXValueGetValue(sv as! AXValue, .cgSize, &size)
+                axCache.append(AXWin(el: axWin, pos: pos, size: size))
+            }
+
+            for wm in windowMoves {
+                guard let cgRect = cgFrames[wm.wid] else {
+                    diag.warn("  wid=\(wm.wid): no CG frame, skipping")
+                    failed.append(wm.wid)
+                    continue
+                }
+                guard let ax = axCache.first(where: {
+                    abs(cgRect.origin.x - $0.pos.x) < 2 && abs(cgRect.origin.y - $0.pos.y) < 2 &&
+                    abs(cgRect.width - $0.size.width) < 2 && abs(cgRect.height - $0.size.height) < 2
+                }) else {
+                    diag.warn("  wid=\(wm.wid): CG frame (\(Int(cgRect.origin.x)),\(Int(cgRect.origin.y)) \(Int(cgRect.width))x\(Int(cgRect.height))) — no AX match among \(axCache.count) AX windows")
+                    for (j, axw) in axCache.enumerated() {
+                        diag.info("    AX[\(j)]: pos=(\(Int(axw.pos.x)),\(Int(axw.pos.y))) size=\(Int(axw.size.width))x\(Int(axw.size.height))")
+                    }
+                    failed.append(wm.wid)
+                    continue
+                }
+
+                let slotIdx = widToSlot[wm.wid] ?? -1
+                // Move only — raise comes later
+                var newPos = CGPoint(x: wm.target.origin.x, y: wm.target.origin.y)
+                var newSize = CGSize(width: wm.target.width, height: wm.target.height)
+                let posOk = AXValueCreate(.cgPoint, &newPos).map {
+                    AXUIElementSetAttributeValue(ax.el, kAXPositionAttribute as CFString, $0)
+                }
+                let sizeOk = AXValueCreate(.cgSize, &newSize).map {
+                    AXUIElementSetAttributeValue(ax.el, kAXSizeAttribute as CFString, $0)
+                }
+                diag.info("  Move[\(slotIdx)] wid=\(wm.wid): target=(\(Int(wm.target.origin.x)),\(Int(wm.target.origin.y))) \(Int(wm.target.width))x\(Int(wm.target.height)) posErr=\(posOk?.rawValue ?? -1) sizeErr=\(sizeOk?.rawValue ?? -1)")
+                resolvedAXElements.append((slotIdx: slotIdx, el: ax.el))
+                moved += 1
+            }
+        }
+
+        // Pass 2: Raise all windows in slot order so they all come to front
+        // Sort by slot index so the layout order is predictable
+        resolvedAXElements.sort { $0.slotIdx < $1.slotIdx }
+        for item in resolvedAXElements {
+            AXUIElementPerformAction(item.el, kAXRaiseAction as CFString)
+        }
+        diag.info("  Raised \(resolvedAXElements.count) windows in slot order")
+
+        // Pass 3: Activate all apps so windows come to front of other apps
+        var activatedPids = Set<Int32>()
+        for win in windows {
+            if !activatedPids.contains(win.pid) {
+                if let app = NSRunningApplication(processIdentifier: win.pid) { app.activate() }
+                activatedPids.insert(win.pid)
+            }
+        }
+
+        if !failed.isEmpty {
+            diag.warn("batchRaiseAndDistribute: failed wids=\(failed)")
+        }
+        diag.success("batchRaiseAndDistribute: moved \(moved)/\(windows.count) [\(desc) grid]")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Batch restore windows to saved frames (single CG query)
+    static func batchRestoreWindows(_ restores: [(wid: UInt32, pid: Int32, frame: WindowFrame)]) {
+        let moves = restores.map { (wid: $0.wid, pid: $0.pid,
+                                     frame: CGRect(x: $0.frame.x, y: $0.frame.y,
+                                                   width: $0.frame.w, height: $0.frame.h)) }
+        batchMoveWindows(moves)
+    }
+
+    /// Restore a window to a saved frame (CG coordinates: top-left origin)
+    static func restoreWindowFrame(wid: UInt32, pid: Int32, frame: WindowFrame) {
+        guard let axWindow = findAXWindowByFrame(wid: wid, pid: pid) else {
+            DiagnosticLog.shared.warn("restoreWindowFrame: couldn't match AX window for wid=\(wid)")
+            return
+        }
+        var newPos = CGPoint(x: frame.x, y: frame.y)
+        var newSize = CGSize(width: frame.w, height: frame.h)
+        if let posValue = AXValueCreate(.cgPoint, &newPos) {
+            AXUIElementSetAttributeValue(axWindow, kAXPositionAttribute as CFString, posValue)
+        }
+        if let sizeValue = AXValueCreate(.cgSize, &newSize) {
+            AXUIElementSetAttributeValue(axWindow, kAXSizeAttribute as CFString, sizeValue)
+        }
+        DiagnosticLog.shared.success("restoreWindowFrame: restored wid=\(wid)")
     }
 
     /// Find the AX window element for a given CG window ID by matching frames

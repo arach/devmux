@@ -60,6 +60,8 @@ struct DesktopInventorySnapshot {
         let devmuxSession: String?
         let spaceIndex: Int?     // 1-based space index within display
         let isOnScreen: Bool     // on current space
+        var inventoryPath: InventoryPath?
+        var appName: String?     // owner app name for filtering
     }
 
     /// Flat list of all windows across all displays/spaces/apps
