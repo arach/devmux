@@ -61,6 +61,11 @@ struct MainView: View {
                         .font(Typo.mono(10))
                         .foregroundColor(Palette.running)
                         .padding(.leading, 4)
+                } else {
+                    Text("None")
+                        .font(Typo.mono(10))
+                        .foregroundColor(Palette.textMuted)
+                        .padding(.leading, 4)
                 }
 
                 Spacer()

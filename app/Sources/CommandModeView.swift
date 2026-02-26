@@ -16,10 +16,13 @@ struct CommandModeView: View {
     @State private var mouseDownMonitor: Any?
     @State private var mouseDragMonitor: Any?
     @State private var mouseUpMonitor: Any?
+    @State private var rightClickMonitor: Any?
     @State private var panelOriginY: CGFloat = 0
     @State private var screenMapCanvasOrigin: CGPoint = .zero
     @State private var screenMapCanvasSize: CGSize = .zero
     @State private var screenMapTitleBarHeight: CGFloat = 0
+    @State private var screenMapClickWindowId: UInt32? = nil
+    @State private var screenMapClickPoint: NSPoint = .zero
     @State private var hoveredWindowId: UInt32?
     @FocusState private var isSearchFieldFocused: Bool
 
@@ -27,14 +30,22 @@ struct CommandModeView: View {
         state.phase == .desktopInventory
     }
 
-    private static let columnWidth: CGFloat = 480
+    // Column widths for inventory table
+    private static let sizeColW: CGFloat = 80
+    private static let tileColW: CGFloat = 60
+
+    private var displayColumnWidth: CGFloat {
+        let count = CGFloat(max(1, state.filteredSnapshot?.displays.count ?? 1))
+        let available = panelWidth - 32 - (count - 1) * 0.5
+        return max(360, (available / count).rounded(.down))
+    }
 
     private var panelWidth: CGFloat {
         if isDesktopInventory {
-            let displayCount = max(1, state.desktopSnapshot?.displays.count ?? 1)
-            let dividers = CGFloat(displayCount - 1)
-            let base = CGFloat(displayCount) * Self.columnWidth + dividers + 32
-            return base
+            let displayCount = max(1, state.filteredSnapshot?.displays.count ?? 1)
+            let ideal = CGFloat(displayCount) * 480 + CGFloat(displayCount - 1) + 32
+            let screenWidth = NSScreen.main?.visibleFrame.width ?? 1920
+            return min(ideal, screenWidth * 0.92)
         }
         return 580
     }
@@ -175,16 +186,18 @@ struct CommandModeView: View {
             ZStack {
                 Group {
                     if let snapshot = state.filteredSnapshot, !snapshot.displays.isEmpty {
-                        HStack(alignment: .top, spacing: 0) {
-                            let total = snapshot.displays.count
-                            ForEach(Array(snapshot.displays.enumerated()), id: \.element.id) { idx, display in
-                                if idx > 0 {
-                                    Rectangle()
-                                        .fill(Palette.border)
-                                        .frame(width: 0.5)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(alignment: .top, spacing: 0) {
+                                let total = snapshot.displays.count
+                                ForEach(Array(snapshot.displays.enumerated()), id: \.element.id) { idx, display in
+                                    if idx > 0 {
+                                        Rectangle()
+                                            .fill(Palette.border)
+                                            .frame(width: 0.5)
+                                    }
+                                    displayColumn(display, index: idx, total: total)
+                                        .frame(width: displayColumnWidth)
                                 }
-                                displayColumn(display, index: idx, total: total)
-                                    .frame(width: Self.columnWidth)
                             }
                         }
                     } else {
@@ -404,9 +417,9 @@ struct CommandModeView: View {
             Text("APP / WINDOW")
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text("SIZE")
-                .frame(width: 90, alignment: .leading)
+                .frame(width: Self.sizeColW, alignment: .leading)
             Text("TILE")
-                .frame(width: 70, alignment: .trailing)
+                .frame(width: Self.tileColW, alignment: .trailing)
         }
         .font(Typo.mono(9))
         .foregroundColor(Palette.textMuted)
@@ -417,7 +430,7 @@ struct CommandModeView: View {
     private func appGroupRows(_ appGroup: DesktopInventorySnapshot.AppGroup, dimmed: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if appGroup.windows.count == 1, let win = appGroup.windows.first {
-                singleWindowRow(app: appGroup.appName, window: win)
+                inventoryRow(window: win, appLabel: appGroup.appName)
                 if state.isSelected(win.id), let path = win.inventoryPath {
                     inventoryPathLabel(path)
                 }
@@ -429,7 +442,7 @@ struct CommandModeView: View {
                     .padding(.top, 4)
                     .padding(.bottom, 1)
                 ForEach(appGroup.windows) { win in
-                    windowRow(win, indented: true)
+                    inventoryRow(window: win, indented: true)
                     if state.isSelected(win.id), let path = win.inventoryPath {
                         inventoryPathLabel(path)
                     }
@@ -447,94 +460,39 @@ struct CommandModeView: View {
             .padding(.vertical, 2)
     }
 
-    private func singleWindowRow(app: String, window: DesktopInventorySnapshot.InventoryWindowInfo) -> some View {
+    /// Unified inventory row — handles both single-app rows (with appLabel) and
+    /// sub-rows under a multi-window app header (with indented).
+    private func inventoryRow(
+        window: DesktopInventorySnapshot.InventoryWindowInfo,
+        appLabel: String? = nil,
+        indented: Bool = false
+    ) -> some View {
         let isSelected = state.isSelected(window.id)
         let isHovered = hoveredWindowId == window.id
-
-        return HStack(spacing: 0) {
-            HStack(spacing: 4) {
-                Text(window.isDevmux ? "●" : "•")
-                    .font(.system(size: 7))
-                    .foregroundColor(window.isDevmux ? Palette.running : (isSelected ? Palette.text : Palette.textDim))
-                Text(app)
-                    .font(Typo.monoBold(10))
-                    .foregroundColor(window.isDevmux ? Palette.running : Palette.text)
-                Text(windowTitle(window))
-                    .font(Typo.mono(10))
-                    .foregroundColor(window.isDevmux ? Palette.running.opacity(isSelected ? 1.0 : 0.7) : (isSelected ? Palette.text : Palette.textDim))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text(sizeText(window.frame))
-                .font(Typo.mono(10))
-                .foregroundColor(isSelected ? Palette.text : Palette.textDim)
-                .frame(width: 90, alignment: .leading)
-
-            Text(window.tilePosition?.label ?? "\u{2014}")
-                .font(Typo.mono(10))
-                .foregroundColor(window.tilePosition != nil ? (isSelected ? Palette.text : Palette.textDim) : Palette.textMuted)
-                .frame(width: 70, alignment: .trailing)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected ? Palette.surface : (isHovered ? Palette.surface.opacity(0.5) : Color.clear))
-                .padding(.horizontal, 6)
-        )
-        .overlay(
-            isSelected ?
-                RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(Palette.borderLit, lineWidth: 0.5)
-                    .padding(.horizontal, 6)
-                : nil
-        )
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(
-                    key: WindowRowFrameKey.self,
-                    value: [window.id: geo.frame(in: .named("inventoryPanel"))]
-                )
-            }
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            WindowTiler.navigateToWindowById(wid: window.id, pid: window.pid)
-        }
-        .onTapGesture(count: 1) {
-            let mods = NSEvent.modifierFlags
-            if mods.contains(.shift) {
-                state.selectRange(to: window.id)
-            } else if mods.contains(.command) {
-                state.toggleSelection(window.id)
-            } else {
-                state.selectSingle(window.id)
-            }
-        }
-        .contextMenu { windowContextMenu(for: window) }
-        .onHover { hovering in hoveredWindowId = hovering ? window.id : nil }
-        .id(window.id)
-    }
-
-    private func windowRow(_ window: DesktopInventorySnapshot.InventoryWindowInfo, indented: Bool) -> some View {
-        let isSelected = state.isSelected(window.id)
-        let isHovered = hoveredWindowId == window.id
+        let isDmux = window.isDevmux
 
         return HStack(spacing: 0) {
             HStack(spacing: 4) {
                 if indented {
-                    Text(" ")
-                        .font(Typo.mono(10))
+                    Spacer().frame(width: 8)
                 }
-                Text(window.isDevmux ? "●" : "•")
+                Text(isDmux ? "●" : "•")
                     .font(.system(size: 7))
-                    .foregroundColor(window.isDevmux ? Palette.running : (isSelected ? Palette.text : Palette.textDim))
+                    .foregroundColor(isDmux ? Palette.running : (isSelected ? Palette.text : Palette.textDim))
+                if let app = appLabel {
+                    Text(app)
+                        .font(Typo.monoBold(10))
+                        .foregroundColor(isDmux ? Palette.running : Palette.text)
+                }
                 Text(windowTitle(window))
                     .font(Typo.mono(10))
-                    .foregroundColor(window.isDevmux ? Palette.running : (isSelected ? Palette.text : Palette.textDim))
+                    .foregroundColor(
+                        isDmux
+                            ? Palette.running.opacity(appLabel != nil && !isSelected ? 0.7 : 1.0)
+                            : (isSelected ? Palette.text : Palette.textDim)
+                    )
                     .lineLimit(1)
-                if window.isDevmux, let session = window.devmuxSession {
+                if isDmux, let session = window.devmuxSession, appLabel == nil {
                     Text("[\(session)]")
                         .font(Typo.mono(9))
                         .foregroundColor(Palette.running.opacity(isSelected ? 1.0 : 0.6))
@@ -545,12 +503,12 @@ struct CommandModeView: View {
             Text(sizeText(window.frame))
                 .font(Typo.mono(10))
                 .foregroundColor(isSelected ? Palette.text : Palette.textDim)
-                .frame(width: 90, alignment: .leading)
+                .frame(width: Self.sizeColW, alignment: .leading)
 
             Text(window.tilePosition?.label ?? "\u{2014}")
                 .font(Typo.mono(10))
                 .foregroundColor(window.tilePosition != nil ? (isSelected ? Palette.text : Palette.textDim) : Palette.textMuted)
-                .frame(width: 70, alignment: .trailing)
+                .frame(width: Self.tileColW, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 3)
@@ -867,8 +825,9 @@ struct CommandModeView: View {
                     chordHint(key: "drag", label: "move")
                     chordHint(key: ".", label: "layer")
                     chordHint(key: "[]", label: "reassign")
-                    chordHint(key: "c", label: "defrag")
-                    chordHint(key: "f", label: "flatten")
+                    chordHint(key: "c", label: "merge")
+                    chordHint(key: "f", label: "merge layers")
+                    chordHint(key: "e", label: "expose")
                     chordHint(key: "v", label: "preview")
                     chordHint(key: "⌘click", label: "multi-layer")
                     chordHint(key: "↩", label: "apply")
@@ -1214,6 +1173,7 @@ struct CommandModeView: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .strokeBorder(Palette.border, lineWidth: 0.5)
                         )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Defrag layers (c)")
@@ -1247,6 +1207,7 @@ struct CommandModeView: View {
                 RoundedRectangle(cornerRadius: 10)
                     .strokeBorder(isActive ? color.opacity(0.4) : Palette.border, lineWidth: 0.5)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -1307,6 +1268,13 @@ struct CommandModeView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onAppear {
+            // Disable window dragging so clicks reach SwiftUI views
+            let panel = CommandModeWindow.shared.panelWindow
+            panel?.isMovableByWindowBackground = false
+            // Proactively claim key status so clicks work immediately
+            if !(panel?.isKeyWindow ?? true) { panel?.makeKey() }
+        }
         .onChange(of: editor?.isPreviewing) { isPreviewing in
             handlePreviewChange(isPreviewing: isPreviewing ?? false)
         }
@@ -1334,13 +1302,15 @@ struct CommandModeView: View {
             let offsetY = (geo.size.height - mapH) / 2
 
             ZStack(alignment: .topLeading) {
-                // Screen background
+                // Screen background — tap to deselect
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Palette.bg.opacity(0.5))
                     .overlay(
                         RoundedRectangle(cornerRadius: 4)
                             .strokeBorder(Palette.border, lineWidth: 0.5)
                     )
+                    .contentShape(Rectangle())
+                    .onTapGesture { state.clearSelection() }
                     .frame(width: mapW, height: mapH)
 
                 // Ghost outlines for edited windows (dashed at original position)
@@ -1360,66 +1330,11 @@ struct CommandModeView: View {
 
                 // Live windows rendered back-to-front (higher zIndex = further back)
                 ForEach(Array(allWindows.sorted(by: { $0.zIndex > $1.zIndex }).enumerated()), id: \.element.id) { _, win in
-                    let f = win.editedFrame
-                    let x = f.origin.x * scale
-                    let y = f.origin.y * scale
-                    let w = max(f.width * scale, 4)
-                    let h = max(f.height * scale, 4)
-                    let isSelected = state.selectedWindowIds.contains(win.id)
-                    let isDragging = editor?.draggingWindowId == win.id
-                    let isInActiveLayer = editor?.isLayerSelected(win.layer) ?? true
-                    let winLayerColor = Self.layerColor(for: win.layer)
-
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(isSelected
-                              ? Palette.running.opacity(0.18)
-                              : win.hasEdits
-                                ? Color.orange.opacity(0.12)
-                                : Palette.surface.opacity(0.7))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 2)
-                                .strokeBorder(isSelected
-                                              ? Palette.running.opacity(0.8)
-                                              : win.hasEdits
-                                                ? Color.orange.opacity(0.6)
-                                                : Palette.border.opacity(0.6),
-                                              lineWidth: isSelected ? 1.5 : 0.5)
-                        )
-                        .overlay(alignment: .leading) {
-                            // Layer color accent (2pt left border)
-                            Rectangle()
-                                .fill(winLayerColor)
-                                .frame(width: 2)
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 2))
-                        .overlay {
-                            VStack(spacing: 1) {
-                                Text(win.app)
-                                    .font(Typo.monoBold(max(7, min(10, h * 0.15))))
-                                    .foregroundColor(isSelected ? Palette.running : Palette.text)
-                                    .lineLimit(1)
-                                if h > 30 {
-                                    Text(win.title)
-                                        .font(Typo.mono(max(6, min(8, h * 0.1))))
-                                        .foregroundColor(Palette.textDim)
-                                        .lineLimit(1)
-                                }
-                                if h > 50 {
-                                    Text("\(Int(win.originalFrame.width))x\(Int(win.originalFrame.height))")
-                                        .font(Typo.mono(6))
-                                        .foregroundColor(Palette.textMuted)
-                                }
-                            }
-                            .padding(.leading, 4)
-                            .padding(2)
-                        }
-                        .frame(width: w, height: h)
-                        .offset(x: x, y: y)
-                        .opacity(isInActiveLayer ? 1.0 : 0.3)
-                        .shadow(color: isDragging ? Palette.running.opacity(0.4) : .clear,
-                                radius: isDragging ? 6 : 0)
+                    screenMapWindowTile(win: win, editor: editor, scale: scale)
                 }
             }
+            .frame(width: mapW, height: mapH)
+            .clipped()
             .offset(x: offsetX, y: offsetY)
             .onAppear {
                 cacheScreenMapGeometry(editor: editor, scale: scale,
@@ -1456,6 +1371,85 @@ struct CommandModeView: View {
                 }
             }
         )
+    }
+
+    // MARK: - Screen Map Window Tile (extracted for type-checker)
+
+    @ViewBuilder
+    private func screenMapWindowTile(win: ScreenMapWindow, editor: ScreenMapEditorState?, scale: CGFloat) -> some View {
+        let f = win.editedFrame
+        let x = f.origin.x * scale
+        let y = f.origin.y * scale
+        let w = max(f.width * scale, 4)
+        let h = max(f.height * scale, 4)
+        let isSelected = state.selectedWindowIds.contains(win.id)
+        let isDragging = editor?.draggingWindowId == win.id
+        let isInActiveLayer = editor?.isLayerSelected(win.layer) ?? true
+        let winLayerColor = Self.layerColor(for: win.layer)
+
+        let fillColor = isSelected
+            ? Palette.running.opacity(0.18)
+            : win.hasEdits
+                ? Color.orange.opacity(0.12)
+                : Palette.surface.opacity(0.7)
+        let borderColor = isSelected
+            ? Palette.running.opacity(0.8)
+            : win.hasEdits
+                ? Color.orange.opacity(0.6)
+                : Palette.border.opacity(0.6)
+
+        // Use Button for click handling — proven reliable (same as sidebar pills).
+        // Drag is handled by NSEvent monitors in installMouseMonitors().
+        Button {
+            if NSEvent.modifierFlags.contains(.command) {
+                state.toggleSelection(win.id)
+            } else {
+                state.selectSingle(win.id)
+            }
+        } label: {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(fillColor)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 2)
+                        .strokeBorder(borderColor, lineWidth: isSelected ? 1.5 : 0.5)
+                )
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(winLayerColor)
+                        .frame(width: 2)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 2))
+                .overlay {
+                    VStack(spacing: 1) {
+                        Text(win.app)
+                            .font(Typo.monoBold(max(7, min(10, h * 0.15))))
+                            .foregroundColor(isSelected ? Palette.running : Palette.text)
+                            .lineLimit(1)
+                        if h > 30 {
+                            Text(win.title)
+                                .font(Typo.mono(max(6, min(8, h * 0.1))))
+                                .foregroundColor(Palette.textDim)
+                                .lineLimit(1)
+                        }
+                        if h > 50 {
+                            Text("\(Int(win.originalFrame.width))x\(Int(win.originalFrame.height))")
+                                .font(Typo.mono(6))
+                                .foregroundColor(Palette.textMuted)
+                        }
+                    }
+                    .padding(.leading, 4)
+                    .padding(2)
+                }
+        }
+        .buttonStyle(.plain)
+        .frame(width: w, height: h)
+        .onHover { isHovering in
+            hoveredWindowId = isHovering ? win.id : (hoveredWindowId == win.id ? nil : hoveredWindowId)
+        }
+        .offset(x: x, y: y)
+        .opacity(isInActiveLayer ? 1.0 : 0.3)
+        .shadow(color: isDragging ? Palette.running.opacity(0.4) : .clear,
+                radius: isDragging ? 6 : 0)
     }
 
     private func cacheScreenMapGeometry(editor: ScreenMapEditorState?, scale: CGFloat,
@@ -1635,81 +1629,61 @@ struct CommandModeView: View {
         let dragThreshold: CGFloat = 4
 
         mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
-            // Only handle clicks in the command mode panel, not other windows (e.g. diagnostics)
             guard let eventWindow = event.window,
                   eventWindow === CommandModeWindow.shared.panelWindow else { return event }
-            let diag = DiagnosticLog.shared
-            diag.info("[ScreenMap] mouseDown: phase=\(state.phase), mode=\(state.desktopMode)")
             guard state.phase == .desktopInventory else { return event }
 
-            if state.desktopMode == .screenMap, let editor = state.screenMapEditor {
-                // Compute flipped screen point (Y=0 at top of window)
-                let flippedPt = flippedScreenPoint(event)
-                diag.info("[ScreenMap] click flipped=(\(String(format: "%.1f", flippedPt.x)), \(String(format: "%.1f", flippedPt.y))) canvasOrigin=(\(String(format: "%.1f", screenMapCanvasOrigin.x)), \(String(format: "%.1f", screenMapCanvasOrigin.y)))")
-
-                // Clicks outside the canvas (title bar, sidebar, footer) → pass through to SwiftUI
-                let canvasRect = CGRect(origin: screenMapCanvasOrigin, size: screenMapCanvasSize)
-                if !canvasRect.contains(flippedPt) {
-                    diag.info("[ScreenMap] click outside canvas — passing to SwiftUI")
-                    return event
-                }
-
-                // Screen map canvas: hit-test to find clicked window
-                if let hitId = screenMapHitTest(flippedScreenPt: flippedPt, editor: editor) {
-                    diag.info("[ScreenMap] HIT wid=\(hitId)")
-                    let mods = event.modifierFlags
-                    if mods.contains(.command) {
-                        state.toggleSelection(hitId)
-                    } else {
-                        state.selectSingle(hitId)
-                    }
-                    // Prepare for potential drag
-                    state.dragStartPoint = event.locationInWindow
-                    if let winIdx = editor.windows.firstIndex(where: { $0.id == hitId }) {
-                        editor.draggingWindowId = hitId
-                        editor.dragStartFrame = editor.windows[winIdx].editedFrame
-                    }
+            if state.desktopMode == .screenMap {
+                // Screen map: use hover-tracked window ID for drag initiation.
+                // No coordinate hit-test needed — SwiftUI's .onHover already knows
+                // which tile the cursor is over (via NSTrackingArea, always accurate).
+                // Click selection is handled by SwiftUI Buttons on each tile.
+                if let hitId = hoveredWindowId {
+                    screenMapClickWindowId = hitId
+                    screenMapClickPoint = event.locationInWindow
                 } else {
-                    diag.info("[ScreenMap] MISS — clearing selection")
-                    state.clearSelection()
+                    screenMapClickWindowId = nil
                 }
-                return nil  // consume canvas clicks to prevent tap gesture interference
+                return event  // pass through to SwiftUI Buttons
             }
 
             state.dragStartPoint = event.locationInWindow
-            return event  // don't consume — let tap gestures fire
+            return event
         }
 
         mouseDragMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDragged) { event in
             guard state.phase == .desktopInventory else { return event }
 
-            if state.desktopMode == .screenMap, let editor = state.screenMapEditor {
-                guard let startPt = state.dragStartPoint,
-                      let dragWinId = editor.draggingWindowId,
-                      let dragStart = editor.dragStartFrame else { return event }
+            // Screen map: drag window tiles via NSEvent (not SwiftUI gesture)
+            if state.desktopMode == .screenMap {
+                guard let hitId = screenMapClickWindowId,
+                      let editor = state.screenMapEditor else { return event }
+                let dx = event.locationInWindow.x - screenMapClickPoint.x
+                let dy = event.locationInWindow.y - screenMapClickPoint.y
+                guard sqrt(dx * dx + dy * dy) >= dragThreshold else { return event }
 
-                let currentPt = event.locationInWindow
-                let dx = currentPt.x - startPt.x
-                let dy = currentPt.y - startPt.y
-                let dist = sqrt(dx * dx + dy * dy)
-                guard dist >= dragThreshold else { return event }
-
-                // Convert pixel delta to screen-space delta
-                let scale = editor.scale
-                guard scale > 0 else { return event }
-                let screenDx = dx / scale
-                // NSEvent Y is bottom-up, screen map Y is top-down
-                let screenDy = -dy / scale
-
-                // Update edited frame
-                if let winIdx = editor.windows.firstIndex(where: { $0.id == dragWinId }) {
-                    editor.windows[winIdx].editedFrame.origin = CGPoint(
-                        x: dragStart.origin.x + screenDx,
-                        y: dragStart.origin.y + screenDy
-                    )
-                    editor.objectWillChange.send()
+                // Start drag if not already dragging
+                if editor.draggingWindowId != hitId {
+                    editor.draggingWindowId = hitId
+                    if let idx = editor.windows.firstIndex(where: { $0.id == hitId }) {
+                        editor.dragStartFrame = editor.windows[idx].editedFrame
+                    }
+                    state.selectSingle(hitId)
                 }
-                return nil  // consume
+
+                // Move window: convert NSEvent delta to screen-coordinate delta
+                guard let startFrame = editor.dragStartFrame,
+                      editor.scale > 0,
+                      let idx = editor.windows.firstIndex(where: { $0.id == hitId }) else { return event }
+                let screenDx = dx / editor.scale
+                let screenDy = -dy / editor.scale  // NSEvent Y is bottom-up, screen Y is top-down
+                editor.windows[idx].editedFrame.origin = CGPoint(
+                    x: startFrame.origin.x + screenDx,
+                    y: startFrame.origin.y + screenDy
+                )
+                editor.objectWillChange.send()
+                state.objectWillChange.send()
+                return nil  // consume drag events
             }
 
             guard let startPt = state.dragStartPoint else { return event }
@@ -1736,18 +1710,82 @@ struct CommandModeView: View {
         }
 
         mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { event in
-            if state.desktopMode == .screenMap, let editor = state.screenMapEditor {
-                editor.draggingWindowId = nil
-                editor.dragStartFrame = nil
-                state.dragStartPoint = nil
-                return event
+            // Screen map: end drag if active
+            if screenMapClickWindowId != nil {
+                if let editor = state.screenMapEditor, editor.draggingWindowId != nil {
+                    editor.draggingWindowId = nil
+                    editor.dragStartFrame = nil
+                    editor.objectWillChange.send()
+                }
+                screenMapClickWindowId = nil
             }
+
             if state.isDragging {
                 state.endDrag()
             }
             state.dragStartPoint = nil
             return event
         }
+
+        rightClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { event in
+            guard let eventWindow = event.window,
+                  eventWindow === CommandModeWindow.shared.panelWindow else { return event }
+            guard state.phase == .desktopInventory,
+                  state.desktopMode == .screenMap,
+                  let editor = state.screenMapEditor else { return event }
+
+            let flippedPt = flippedScreenPoint(event)
+            let canvasRect = CGRect(origin: screenMapCanvasOrigin, size: screenMapCanvasSize)
+            guard canvasRect.contains(flippedPt) else { return event }
+
+            if let hitId = screenMapHitTest(flippedScreenPt: flippedPt, editor: editor) {
+                // Select the window if not already selected (standard macOS right-click behavior)
+                if !state.isSelected(hitId) {
+                    state.selectSingle(hitId)
+                }
+                // Show context menu at the click location
+                showLayerContextMenu(for: hitId, at: event.locationInWindow, in: eventWindow, editor: editor)
+                return nil  // consume
+            }
+            return event
+        }
+    }
+
+    /// Show a right-click context menu for moving a screen map window between layers
+    private func showLayerContextMenu(for windowId: UInt32, at point: NSPoint, in window: NSWindow, editor: ScreenMapEditorState) {
+        guard let winIdx = editor.windows.firstIndex(where: { $0.id == windowId }) else { return }
+        let win = editor.windows[winIdx]
+        let currentLayer = win.layer
+
+        let menu = NSMenu()
+
+        // Header: app name + current layer
+        let header = NSMenuItem(title: "\(win.app) — Layer \(currentLayer)", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        menu.addItem(.separator())
+
+        // "Move to Layer X" for each existing layer (skip current)
+        for layer in 0..<editor.layerCount where layer != currentLayer {
+            let count = editor.windowCount(for: layer)
+            let item = NSMenuItem(title: "Move to Layer \(layer) (\(count) windows)", action: nil, keyEquivalent: "")
+            item.target = nil
+            let targetLayer = layer
+            item.representedObject = LayerMenuAction(windowId: windowId, targetLayer: targetLayer, editor: editor, state: state)
+            item.action = #selector(LayerMenuActionTarget.performLayerMove(_:))
+            item.target = LayerMenuActionTarget.shared
+            menu.addItem(item)
+        }
+
+        // "Move to New Layer"
+        let newLayerItem = NSMenuItem(title: "Move to New Layer", action: nil, keyEquivalent: "")
+        newLayerItem.representedObject = LayerMenuAction(windowId: windowId, targetLayer: editor.layerCount, editor: editor, state: state)
+        newLayerItem.action = #selector(LayerMenuActionTarget.performLayerMove(_:))
+        newLayerItem.target = LayerMenuActionTarget.shared
+        menu.addItem(newLayerItem)
+
+        // Pop up the menu at the click location
+        menu.popUp(positioning: nil, at: point, in: window.contentView)
     }
 
     /// Hit-test the screen map using a flipped screen point (Y=0 at top of screen)
@@ -1816,6 +1854,7 @@ struct CommandModeView: View {
         if let m = mouseDownMonitor { NSEvent.removeMonitor(m); mouseDownMonitor = nil }
         if let m = mouseDragMonitor { NSEvent.removeMonitor(m); mouseDragMonitor = nil }
         if let m = mouseUpMonitor { NSEvent.removeMonitor(m); mouseUpMonitor = nil }
+        if let m = rightClickMonitor { NSEvent.removeMonitor(m); rightClickMonitor = nil }
     }
 
     // Clear hover when leaving desktop inventory
@@ -1828,6 +1867,32 @@ struct CommandModeView: View {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
         }
+    }
+}
+
+// MARK: - Right-Click Context Menu Helpers
+
+/// Data payload attached to each NSMenuItem via representedObject
+struct LayerMenuAction {
+    let windowId: UInt32
+    let targetLayer: Int
+    let editor: ScreenMapEditorState
+    let state: CommandModeState
+}
+
+/// Singleton target for NSMenu item actions (NSMenu requires an @objc target)
+final class LayerMenuActionTarget: NSObject {
+    static let shared = LayerMenuActionTarget()
+
+    @objc func performLayerMove(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? LayerMenuAction else { return }
+        let diag = DiagnosticLog.shared
+        if let idx = action.editor.windows.firstIndex(where: { $0.id == action.windowId }) {
+            let oldLayer = action.editor.windows[idx].layer
+            diag.info("[ScreenMap] contextMenu: \(action.editor.windows[idx].app) L\(oldLayer)→L\(action.targetLayer)")
+        }
+        action.editor.reassignLayer(windowId: action.windowId, toLayer: action.targetLayer, fitToAvailable: true)
+        action.state.objectWillChange.send()
     }
 }
 

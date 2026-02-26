@@ -128,6 +128,25 @@ final class ScreenMapEditorState: ObservableObject {
         }
     }
 
+    /// Cycle layer backward: N-1 → … → 0 → empty(all) → N-1
+    /// From multi-select → collapse to last layer and resume cycling
+    func cyclePreviousLayer() {
+        if selectedLayers.count > 1 {
+            selectedLayers = [layerCount - 1]
+            return
+        }
+        guard let current = activeLayer else {
+            // Showing all → go to last layer
+            selectedLayers = [layerCount - 1]
+            return
+        }
+        if current == 0 {
+            selectedLayers = []  // all
+        } else {
+            selectedLayers = [current - 1]
+        }
+    }
+
     /// Direct layer selection (from sidebar clicks)
     func selectLayer(_ layer: Int?) {
         DiagnosticLog.shared.info("[ScreenMap] selectLayer: \(layer.map { "\($0)" } ?? "all")")
@@ -218,6 +237,95 @@ final class ScreenMapEditorState: ObservableObject {
         return valid.max(by: { $0.width * $0.height < $1.width * $1.height })
     }
 
+    /// Auto-tile the active layer's windows into a grid (edits editedFrame only)
+    func autoTileLayer() -> Int {
+        guard let layer = activeLayer else { return 0 }
+
+        var indices = windows.indices.filter { windows[$0].layer == layer }
+        guard indices.count >= 2 else { return indices.count }
+
+        // Sort by zIndex (front-to-back) for predictable assignment
+        indices.sort { windows[$0].zIndex < windows[$1].zIndex }
+
+        let screen = NSScreen.main ?? NSScreen.screens.first!
+        let visible = screen.visibleFrame
+        let primaryHeight = (NSScreen.screens.first ?? screen).frame.height
+        let axTop = primaryHeight - visible.maxY
+
+        let shape = WindowTiler.gridShape(for: indices.count)
+        let rowCount = shape.count
+        let rowH = visible.height / CGFloat(rowCount)
+
+        var slotIdx = 0
+        for (row, cols) in shape.enumerated() {
+            let colW = visible.width / CGFloat(cols)
+            let axY = axTop + CGFloat(row) * rowH
+            for col in 0..<cols {
+                guard slotIdx < indices.count else { break }
+                let x = visible.origin.x + CGFloat(col) * colW
+                windows[indices[slotIdx]].editedFrame = CGRect(x: x, y: axY, width: colW, height: rowH)
+                slotIdx += 1
+            }
+        }
+        return indices.count
+    }
+
+    /// Expose the active layer's windows: spread into a padded grid with gaps.
+    /// Unlike autoTileLayer() which tiles edge-to-edge, this preserves aspect ratios
+    /// and adds padding so windows are visually separated.
+    func exposeLayer() -> Int {
+        guard let layer = activeLayer else { return 0 }
+
+        var indices = windows.indices.filter { windows[$0].layer == layer }
+        guard indices.count >= 2 else { return indices.count }
+
+        indices.sort { windows[$0].zIndex < windows[$1].zIndex }
+
+        let screen = NSScreen.main ?? NSScreen.screens.first!
+        let visible = screen.visibleFrame
+        let primaryHeight = (NSScreen.screens.first ?? screen).frame.height
+        let axTop = primaryHeight - visible.maxY
+
+        let padding: CGFloat = 20
+        let shape = WindowTiler.gridShape(for: indices.count)
+        let rowCount = shape.count
+        let rowH = visible.height / CGFloat(rowCount)
+
+        var slotIdx = 0
+        for (row, cols) in shape.enumerated() {
+            let colW = visible.width / CGFloat(cols)
+            let axY = axTop + CGFloat(row) * rowH
+            for col in 0..<cols {
+                guard slotIdx < indices.count else { break }
+                let idx = indices[slotIdx]
+                let orig = windows[idx].originalFrame
+
+                // Cell with padding
+                let cellX = visible.origin.x + CGFloat(col) * colW + padding
+                let cellY = axY + padding
+                let cellW = colW - padding * 2
+                let cellH = rowH - padding * 2
+
+                // Scale to fit cell preserving aspect ratio
+                let aspect = orig.width / max(orig.height, 1)
+                var fitW = cellW
+                var fitH = fitW / aspect
+                if fitH > cellH {
+                    fitH = cellH
+                    fitW = fitH * aspect
+                }
+
+                // Center in cell
+                let x = cellX + (cellW - fitW) / 2
+                let y = cellY + (cellH - fitH) / 2
+
+                windows[idx].editedFrame = CGRect(x: x, y: y, width: fitW, height: fitH)
+                slotIdx += 1
+            }
+        }
+        return indices.count
+    }
+
     /// Reset all edited frames back to original
     func discardEdits() {
         for i in windows.indices {
@@ -233,6 +341,7 @@ final class ScreenMapEditorState: ObservableObject {
         for i in windows.indices {
             windows[i].layer = mapping[windows[i].layer] ?? windows[i].layer
         }
+        selectedLayers = Set(selectedLayers.compactMap { mapping[$0] })
     }
 
     /// Consolidate windows into fewer layers (defragmentation).
@@ -282,6 +391,11 @@ final class ScreenMapEditorState: ObservableObject {
 
         // Clamp selectedLayers if any went out of range
         selectedLayers = selectedLayers.filter { $0 < layerCount }
+
+        // After consolidation, collapse multi-select to show all so user sees the result
+        if selectedLayers.count > 1 {
+            selectedLayers = []
+        }
 
         return (old: oldCount, new: layerCount)
     }
@@ -560,12 +674,12 @@ final class CommandModeState: ObservableObject {
     /// Compact panel size for chord view
     private let chordPanelSize: (CGFloat, CGFloat) = (580, 360)
 
-    /// Compute desktop inventory panel size based on display count
+    /// Compute desktop inventory panel size based on display count, clamped to screen
     private var desktopPanelSize: (CGFloat, CGFloat) {
         let displayCount = max(1, desktopSnapshot?.displays.count ?? 1)
-        let columnWidth: CGFloat = 480
-        let dividers: CGFloat = CGFloat(displayCount - 1)
-        let width = CGFloat(displayCount) * columnWidth + dividers + 32
+        let ideal = CGFloat(displayCount) * 480 + CGFloat(displayCount - 1) + 32
+        let screenWidth = NSScreen.main?.visibleFrame.width ?? 1920
+        let width = min(ideal, screenWidth * 0.92)
         let height: CGFloat = 640
         return (width, height)
     }
@@ -656,7 +770,7 @@ final class CommandModeState: ObservableObject {
         case .browsing:     return handleBrowsingKey(keyCode, modifiers: modifiers)
         case .tiling:       return handleTilingKey(keyCode)
         case .gridPreview:  return handleGridPreviewKey(keyCode)
-        case .screenMap:    return handleScreenMapKey(keyCode)
+        case .screenMap:    return handleScreenMapKey(keyCode, modifiers: modifiers)
         }
     }
 
@@ -881,7 +995,7 @@ final class CommandModeState: ObservableObject {
 
     // MARK: Screen Map Editor
 
-    private func handleScreenMapKey(_ keyCode: UInt16) -> Bool {
+    private func handleScreenMapKey(_ keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         let diag = DiagnosticLog.shared
         diag.info("[ScreenMap] key: \(keyCode)")
         switch keyCode {
@@ -908,8 +1022,12 @@ final class CommandModeState: ObservableObject {
             applyScreenMapEdits()
             return true
 
-        case 47: // . → cycle layer
-            screenMapEditor?.cycleLayer()
+        case 47: // . → cycle layer, shift+. → cycle reverse
+            if modifiers.contains(.shift) {
+                screenMapEditor?.cyclePreviousLayer()
+            } else {
+                screenMapEditor?.cycleLayer()
+            }
             diag.info("[ScreenMap] cycle → \(screenMapEditor?.layerLabel ?? "nil")")
             objectWillChange.send()
             return true
@@ -963,6 +1081,25 @@ final class CommandModeState: ObservableObject {
         case 9: // v → toggle layer preview
             diag.info("[ScreenMap] v: toggle preview")
             previewScreenMapLayer()
+            return true
+
+        case 17: // t → auto-tile active layer
+            if let editor = screenMapEditor {
+                let count = editor.autoTileLayer()
+                if count >= 2 {
+                    flash("Tiled \(count) windows")
+                } else if count == 1 {
+                    flash("Only 1 window in layer")
+                } else {
+                    flash("Select a single layer first")
+                }
+                objectWillChange.send()
+            }
+            return true
+
+        case 14: // e → expose (spread windows with gaps)
+            diag.info("[ScreenMap] e: expose layer")
+            exposeScreenMapLayer()
             return true
 
         default:
@@ -1208,6 +1345,19 @@ final class CommandModeState: ObservableObject {
     }
 
     /// Consolidate screen map layers (defrag) and show flash
+    func exposeScreenMapLayer() {
+        guard let editor = screenMapEditor else { return }
+        let count = editor.exposeLayer()
+        if count >= 2 {
+            flash("Exposed \(count) windows")
+        } else if count == 1 {
+            flash("Only 1 window in layer")
+        } else {
+            flash("Select a single layer first")
+        }
+        objectWillChange.send()
+    }
+
     func consolidateScreenMapLayers() {
         guard let editor = screenMapEditor else { return }
         let result = editor.consolidateLayers()

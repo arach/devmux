@@ -1,10 +1,34 @@
 import AppKit
 import SwiftUI
 
-/// NSPanel subclass that accepts key events even without a titlebar
+/// NSPanel subclass that accepts key events and first-click mouse events.
+/// Overrides sendEvent to ensure the panel is key before processing clicks,
+/// which is required for SwiftUI gesture/button handling in .nonactivatingPanel panels.
 private class CommandModePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+    override var acceptsMouseMovedEvents: Bool {
+        get { true }
+        set { super.acceptsMouseMovedEvents = newValue }
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        // Non-activating panels can silently lose key status. Re-assert key
+        // and app activation before every mouse-down so SwiftUI Buttons/gestures
+        // fire reliably — including the very first click after the panel appears.
+        if event.type == .leftMouseDown || event.type == .rightMouseDown {
+            if !NSApp.isActive {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            if !isKeyWindow { makeKey() }
+        }
+        super.sendEvent(event)
+    }
+}
+
+/// NSHostingView subclass that accepts first-click events in non-activating panels
+private class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 final class CommandModeWindow {
@@ -58,7 +82,7 @@ final class CommandModeWindow {
         let view = CommandModeView(state: state)
             .preferredColorScheme(.dark)
 
-        let hosting = NSHostingView(rootView: view)
+        let hosting = FirstClickHostingView(rootView: view)
         hosting.translatesAutoresizingMaskIntoConstraints = false
 
         let panel = CommandModePanel(
@@ -72,8 +96,9 @@ final class CommandModeWindow {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .floating
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = (state.desktopMode != .screenMap)
         panel.hidesOnDeactivate = true
+        panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
 
@@ -106,10 +131,10 @@ final class CommandModeWindow {
             panel.setFrameOrigin(NSPoint(x: x, y: y))
         }
 
+        self.panel = panel
+
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-
-        self.panel = panel
     }
 
     private func animateResize(width: CGFloat, height: CGFloat) {
