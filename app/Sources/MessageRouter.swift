@@ -147,8 +147,20 @@ enum MessageRouter {
     }
 
     private static func windowFocus(_ params: JSON?) throws -> JSON {
+        // wid-based focus: raise any window by CGWindowID
+        if let wid = params?["wid"]?.uint32Value {
+            guard let entry = DesktopModel.shared.windows[wid] else {
+                throw RouterError.notFound("window \(wid)")
+            }
+            DispatchQueue.main.async {
+                WindowTiler.focusWindow(wid: wid, pid: entry.pid)
+            }
+            return .object(["ok": .bool(true), "wid": .int(Int(wid)), "app": .string(entry.app)])
+        }
+
+        // session-based focus: existing tmux path
         guard let session = params?["session"]?.stringValue else {
-            throw RouterError.missingParam("session")
+            throw RouterError.missingParam("session or wid")
         }
         let terminal = Preferences.shared.terminal
         DispatchQueue.main.async {

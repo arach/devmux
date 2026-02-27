@@ -1,6 +1,10 @@
 import AppKit
 import CoreGraphics
 
+// Private API: get CGWindowID from an AXUIElement
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 // MARK: - Window Highlight Overlay
 
 final class WindowHighlight {
@@ -1013,68 +1017,90 @@ enum WindowTiler {
         guard !moves.isEmpty else { return }
         let diag = DiagnosticLog.shared
 
-        // 1. Single CG query to get all window frames
-        guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
-
-        var cgFrames: [UInt32: CGRect] = [:]
-        for info in windowList {
-            guard let num = info[kCGWindowNumber as String] as? UInt32,
-                  let dict = info[kCGWindowBounds as String] as? NSDictionary else { continue }
-            var rect = CGRect.zero
-            if CGRectMakeWithDictionaryRepresentation(dict, &rect) {
-                cgFrames[num] = rect
-            }
-        }
-
-        // 2. Group by pid so we query each app's AX windows once
+        // Group by pid so we query each app's AX windows once
         var byPid: [Int32: [(wid: UInt32, target: CGRect)]] = [:]
         for move in moves {
             byPid[move.pid, default: []].append((wid: move.wid, target: move.frame))
         }
 
-        // 3. For each process: get AX windows once, match by frame, set new position+size
+        // For each process: get AX windows, match by CGWindowID, move+resize
         var moved = 0
+        var failed = 0
         for (pid, windowMoves) in byPid {
             let appRef = AXUIElementCreateApplication(pid)
             var windowsRef: CFTypeRef?
             let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
-            guard err == .success, let axWindows = windowsRef as? [AXUIElement] else { continue }
+            guard err == .success, let axWindows = windowsRef as? [AXUIElement] else {
+                diag.info("[batchMove] AX query failed for pid \(pid)")
+                failed += windowMoves.count
+                continue
+            }
 
-            // Cache AX window frames
-            struct AXWinInfo { let element: AXUIElement; let pos: CGPoint; let size: CGSize }
-            var axInfos: [AXWinInfo] = []
+            // Build wid → AXUIElement map using _AXUIElementGetWindow
+            var axByWid: [UInt32: AXUIElement] = [:]
             for axWin in axWindows {
-                var posRef: CFTypeRef?
-                var sizeRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(axWin, kAXPositionAttribute as CFString, &posRef)
-                AXUIElementCopyAttributeValue(axWin, kAXSizeAttribute as CFString, &sizeRef)
-                guard let pv = posRef, let sv = sizeRef else { continue }
-                var pos = CGPoint.zero; var size = CGSize.zero
-                AXValueGetValue(pv as! AXValue, .cgPoint, &pos)
-                AXValueGetValue(sv as! AXValue, .cgSize, &size)
-                axInfos.append(AXWinInfo(element: axWin, pos: pos, size: size))
+                var windowId: CGWindowID = 0
+                if _AXUIElementGetWindow(axWin, &windowId) == .success {
+                    axByWid[windowId] = axWin
+                }
             }
 
             for wm in windowMoves {
-                guard let cgRect = cgFrames[wm.wid] else { continue }
-                // Match CG frame to AX window
-                guard let axInfo = axInfos.first(where: {
-                    abs(cgRect.origin.x - $0.pos.x) < 2 && abs(cgRect.origin.y - $0.pos.y) < 2 &&
-                    abs(cgRect.width - $0.size.width) < 2 && abs(cgRect.height - $0.size.height) < 2
-                }) else { continue }
+                guard let axWin = axByWid[wm.wid] else {
+                    diag.info("[batchMove] no AX match for wid \(wm.wid)")
+                    failed += 1
+                    continue
+                }
 
                 var newPos = CGPoint(x: wm.target.origin.x, y: wm.target.origin.y)
                 var newSize = CGSize(width: wm.target.width, height: wm.target.height)
+
+                // Size → Position → Size → Position
+                // Setting size first prevents clipping when moving to screen edges.
+                // Double-set catches apps that adjust size after position change.
+                if let sv = AXValueCreate(.cgSize, &newSize) {
+                    let r = AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sv)
+                    if r != .success {
+                        diag.info("[batchMove] wid \(wm.wid) size1 failed: \(r.rawValue)")
+                    }
+                }
                 if let pv = AXValueCreate(.cgPoint, &newPos) {
-                    AXUIElementSetAttributeValue(axInfo.element, kAXPositionAttribute as CFString, pv)
+                    AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, pv)
                 }
                 if let sv = AXValueCreate(.cgSize, &newSize) {
-                    AXUIElementSetAttributeValue(axInfo.element, kAXSizeAttribute as CFString, sv)
+                    AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sv)
+                }
+                if let pv = AXValueCreate(.cgPoint, &newPos) {
+                    AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, pv)
                 }
                 moved += 1
             }
         }
+        if failed > 0 {
+            diag.info("[batchMove] \(failed) windows failed to match")
+        }
         diag.success("batchMoveWindows: moved \(moved)/\(moves.count) windows")
+    }
+
+    /// Raise and focus a single window by its CGWindowID.
+    static func focusWindow(wid: UInt32, pid: Int32) {
+        let appRef = AXUIElementCreateApplication(pid)
+        var windowsRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let axWindows = windowsRef as? [AXUIElement] else { return }
+
+        for axWin in axWindows {
+            var windowId: CGWindowID = 0
+            if _AXUIElementGetWindow(axWin, &windowId) == .success, windowId == wid {
+                AXUIElementPerformAction(axWin, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(axWin, kAXMainAttribute as CFString, kCFBooleanTrue)
+                break
+            }
+        }
+
+        if let app = NSRunningApplication(processIdentifier: pid) {
+            app.activate()
+        }
     }
 
     /// Move AND raise windows in a single CG+AX pass (avoids duplicate lookups).
@@ -1082,18 +1108,6 @@ enum WindowTiler {
     static func batchMoveAndRaiseWindows(_ moves: [(wid: UInt32, pid: Int32, frame: CGRect)]) {
         guard !moves.isEmpty else { return }
         let diag = DiagnosticLog.shared
-
-        guard let windowList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
-
-        var cgFrames: [UInt32: CGRect] = [:]
-        for info in windowList {
-            guard let num = info[kCGWindowNumber as String] as? UInt32,
-                  let dict = info[kCGWindowBounds as String] as? NSDictionary else { continue }
-            var rect = CGRect.zero
-            if CGRectMakeWithDictionaryRepresentation(dict, &rect) {
-                cgFrames[num] = rect
-            }
-        }
 
         var byPid: [Int32: [(wid: UInt32, target: CGRect)]] = [:]
         for move in moves {
@@ -1109,39 +1123,35 @@ enum WindowTiler {
             let err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute as CFString, &windowsRef)
             guard err == .success, let axWindows = windowsRef as? [AXUIElement] else { continue }
 
-            struct AXWinInfo { let element: AXUIElement; let pos: CGPoint; let size: CGSize }
-            var axInfos: [AXWinInfo] = []
+            // Build wid → AXUIElement map using _AXUIElementGetWindow
+            var axByWid: [UInt32: AXUIElement] = [:]
             for axWin in axWindows {
-                var posRef: CFTypeRef?; var sizeRef: CFTypeRef?
-                AXUIElementCopyAttributeValue(axWin, kAXPositionAttribute as CFString, &posRef)
-                AXUIElementCopyAttributeValue(axWin, kAXSizeAttribute as CFString, &sizeRef)
-                guard let pv = posRef, let sv = sizeRef else { continue }
-                var pos = CGPoint.zero; var size = CGSize.zero
-                AXValueGetValue(pv as! AXValue, .cgPoint, &pos)
-                AXValueGetValue(sv as! AXValue, .cgSize, &size)
-                axInfos.append(AXWinInfo(element: axWin, pos: pos, size: size))
+                var windowId: CGWindowID = 0
+                if _AXUIElementGetWindow(axWin, &windowId) == .success {
+                    axByWid[windowId] = axWin
+                }
             }
 
             for wm in windowMoves {
-                guard let cgRect = cgFrames[wm.wid] else { continue }
-                guard let axInfo = axInfos.first(where: {
-                    abs(cgRect.origin.x - $0.pos.x) < 2 && abs(cgRect.origin.y - $0.pos.y) < 2 &&
-                    abs(cgRect.width - $0.size.width) < 2 && abs(cgRect.height - $0.size.height) < 2
-                }) else { continue }
+                guard let axWin = axByWid[wm.wid] else { continue }
 
-                // Move
                 var newPos = CGPoint(x: wm.target.origin.x, y: wm.target.origin.y)
                 var newSize = CGSize(width: wm.target.width, height: wm.target.height)
+
+                // Position → Size → Position (double-set avoids clipping/snapping)
                 if let pv = AXValueCreate(.cgPoint, &newPos) {
-                    AXUIElementSetAttributeValue(axInfo.element, kAXPositionAttribute as CFString, pv)
+                    AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, pv)
                 }
                 if let sv = AXValueCreate(.cgSize, &newSize) {
-                    AXUIElementSetAttributeValue(axInfo.element, kAXSizeAttribute as CFString, sv)
+                    AXUIElementSetAttributeValue(axWin, kAXSizeAttribute as CFString, sv)
+                }
+                if let pv = AXValueCreate(.cgPoint, &newPos) {
+                    AXUIElementSetAttributeValue(axWin, kAXPositionAttribute as CFString, pv)
                 }
 
                 // Raise
-                AXUIElementPerformAction(axInfo.element, kAXRaiseAction as CFString)
-                AXUIElementSetAttributeValue(axInfo.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementPerformAction(axWin, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(axWin, kAXMainAttribute as CFString, kCFBooleanTrue)
 
                 processed += 1
             }

@@ -29,6 +29,7 @@ private class CommandModePanel: NSPanel {
 /// NSHostingView subclass that accepts first-click events in non-activating panels
 private class FirstClickHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var focusRingType: NSFocusRingType { get { .none } set {} }
 }
 
 final class CommandModeWindow {
@@ -71,10 +72,26 @@ final class CommandModeWindow {
         let initialWidth: CGFloat
         let initialHeight: CGFloat
         if state.phase == .desktopInventory {
-            let displayCount = max(1, state.desktopSnapshot?.displays.count ?? 1)
-            let columnWidth: CGFloat = 480
-            initialWidth = CGFloat(displayCount) * columnWidth + CGFloat(displayCount - 1) + 32
-            initialHeight = 640
+            if state.desktopMode == .screenMap {
+                // Compute bounding box aspect ratio from all screens
+                let screens = NSScreen.screens
+                let primaryHeight = screens.first?.frame.height ?? 0
+                var bbox = CGRect.zero
+                for (i, screen) in screens.enumerated() {
+                    let cgY = primaryHeight - screen.frame.maxY
+                    let cgRect = CGRect(x: screen.frame.origin.x, y: cgY,
+                                        width: screen.frame.width, height: screen.frame.height)
+                    bbox = i == 0 ? cgRect : bbox.union(cgRect)
+                }
+                let aspectRatio = bbox.width / max(bbox.height, 1)
+                initialHeight = 500
+                initialWidth = max(700, initialHeight * aspectRatio + 80)  // +80 for sidebar
+            } else {
+                let displayCount = max(1, state.desktopSnapshot?.displays.count ?? 1)
+                let columnWidth: CGFloat = 480
+                initialWidth = CGFloat(displayCount) * columnWidth + CGFloat(displayCount - 1) + 32
+                initialHeight = 640
+            }
         } else {
             initialWidth = 580; initialHeight = 360
         }

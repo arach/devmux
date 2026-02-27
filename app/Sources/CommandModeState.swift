@@ -45,6 +45,14 @@ enum DesktopInventoryMode: Equatable {
     case screenMap    // m → interactive screen map editor
 }
 
+// MARK: - Display Geometry
+
+struct DisplayGeometry {
+    let index: Int
+    let cgRect: CGRect   // in unified CG coords (top-left origin)
+    let label: String    // "Display 0", "Display 1"
+}
+
 // MARK: - Screen Map Editor
 
 struct ScreenMapWindow: Identifiable {
@@ -55,7 +63,8 @@ struct ScreenMapWindow: Identifiable {
     let originalFrame: CGRect   // frozen at snapshot time
     var editedFrame: CGRect     // mutated during drag
     let zIndex: Int             // 0 = frontmost
-    var layer: Int              // assigned by iterative peeling
+    var layer: Int              // assigned by iterative peeling (per-display)
+    let displayIndex: Int       // which monitor this window belongs to
     var hasEdits: Bool { originalFrame != editedFrame }
 }
 
@@ -64,6 +73,21 @@ final class ScreenMapEditorState: ObservableObject {
     @Published var selectedLayers: Set<Int> = [0]  // empty = show all
     @Published var draggingWindowId: UInt32? = nil
     @Published var isPreviewing: Bool = false
+    @Published var lastActionRef: String? = nil
+    @Published var zoomLevel: CGFloat = 1.0   // 1.0 = fit-all
+    @Published var panOffset: CGPoint = .zero  // canvas-local pixels
+
+    static let minZoom: CGFloat = 0.3
+    static let maxZoom: CGFloat = 5.0
+
+    var effectiveScale: CGFloat { scale * zoomLevel }
+
+    func resetZoomPan() {
+        zoomLevel = 1.0
+        panOffset = .zero
+    }
+
+    let actionLog = ScreenMapActionLog()
 
     /// Backward-compat: single active layer when exactly one is selected
     var activeLayer: Int? {
@@ -78,12 +102,17 @@ final class ScreenMapEditorState: ObservableObject {
     var dragStartFrame: CGRect? = nil
 
     // Cached geometry for coordinate conversion (set by the view)
-    var scale: CGFloat = 1
+    var fitScale: CGFloat = 1   // base fit-all scale (before zoom)
+    var scale: CGFloat = 1      // effective scale (fitScale * zoomLevel)
     var mapOrigin: CGPoint = .zero
     var screenSize: CGSize = .zero
+    var bboxOrigin: CGPoint = .zero  // top-left of the bounding box in CG coords
 
-    init(windows: [ScreenMapWindow]) {
+    let displays: [DisplayGeometry]
+
+    init(windows: [ScreenMapWindow], displays: [DisplayGeometry] = []) {
         self.windows = windows
+        self.displays = displays
     }
 
     /// Number of distinct layers
@@ -241,89 +270,201 @@ final class ScreenMapEditorState: ObservableObject {
     func autoTileLayer() -> Int {
         guard let layer = activeLayer else { return 0 }
 
-        var indices = windows.indices.filter { windows[$0].layer == layer }
-        guard indices.count >= 2 else { return indices.count }
+        let screens = NSScreen.screens
+        let primaryHeight = screens.first?.frame.height ?? 0
+        var totalTiled = 0
 
-        // Sort by zIndex (front-to-back) for predictable assignment
-        indices.sort { windows[$0].zIndex < windows[$1].zIndex }
+        // Tile per display: each monitor tiles its own windows independently
+        let displayIndices = Set(windows.filter { $0.layer == layer }.map(\.displayIndex))
+        for dIdx in displayIndices {
+            var indices = windows.indices.filter { windows[$0].layer == layer && windows[$0].displayIndex == dIdx }
+            guard indices.count >= 1 else { continue }
 
-        let screen = NSScreen.main ?? NSScreen.screens.first!
-        let visible = screen.visibleFrame
-        let primaryHeight = (NSScreen.screens.first ?? screen).frame.height
-        let axTop = primaryHeight - visible.maxY
+            indices.sort { windows[$0].zIndex < windows[$1].zIndex }
 
-        let shape = WindowTiler.gridShape(for: indices.count)
-        let rowCount = shape.count
-        let rowH = visible.height / CGFloat(rowCount)
+            let screen = dIdx < screens.count ? screens[dIdx] : screens.first!
+            let visible = screen.visibleFrame
+            let axTop = primaryHeight - visible.maxY
 
-        var slotIdx = 0
-        for (row, cols) in shape.enumerated() {
-            let colW = visible.width / CGFloat(cols)
-            let axY = axTop + CGFloat(row) * rowH
-            for col in 0..<cols {
-                guard slotIdx < indices.count else { break }
-                let x = visible.origin.x + CGFloat(col) * colW
-                windows[indices[slotIdx]].editedFrame = CGRect(x: x, y: axY, width: colW, height: rowH)
-                slotIdx += 1
+            if indices.count == 1 {
+                // Single window: maximize to display
+                windows[indices[0]].editedFrame = CGRect(
+                    x: visible.origin.x, y: axTop,
+                    width: visible.width, height: visible.height
+                )
+                totalTiled += 1
+                continue
             }
+
+            let shape = WindowTiler.gridShape(for: indices.count)
+            let rowCount = shape.count
+            let totalW = Int(visible.width)
+            let totalH = Int(visible.height)
+            let baseX = Int(visible.origin.x)
+            let baseY = Int(axTop)
+
+            var slotIdx = 0
+            for (row, cols) in shape.enumerated() {
+                let y0 = baseY + (row * totalH) / rowCount
+                let y1 = baseY + ((row + 1) * totalH) / rowCount
+                for col in 0..<cols {
+                    guard slotIdx < indices.count else { break }
+                    let x0 = baseX + (col * totalW) / cols
+                    let x1 = baseX + ((col + 1) * totalW) / cols
+                    windows[indices[slotIdx]].editedFrame = CGRect(
+                        x: CGFloat(x0), y: CGFloat(y0),
+                        width: CGFloat(x1 - x0), height: CGFloat(y1 - y0)
+                    )
+                    slotIdx += 1
+                }
+            }
+            totalTiled += indices.count
         }
-        return indices.count
+        return totalTiled
     }
 
     /// Expose the active layer's windows: spread into a padded grid with gaps.
     /// Unlike autoTileLayer() which tiles edge-to-edge, this preserves aspect ratios
-    /// and adds padding so windows are visually separated.
+    /// and adds padding so windows are visually separated. Operates per display.
     func exposeLayer() -> Int {
         guard let layer = activeLayer else { return 0 }
 
-        var indices = windows.indices.filter { windows[$0].layer == layer }
-        guard indices.count >= 2 else { return indices.count }
+        let screens = NSScreen.screens
+        let primaryHeight = screens.first?.frame.height ?? 0
+        var totalExposed = 0
 
-        indices.sort { windows[$0].zIndex < windows[$1].zIndex }
+        let displayIndices = Set(windows.filter { $0.layer == layer }.map(\.displayIndex))
+        for dIdx in displayIndices {
+            var indices = windows.indices.filter { windows[$0].layer == layer && windows[$0].displayIndex == dIdx }
+            guard indices.count >= 2 else { totalExposed += indices.count; continue }
 
-        let screen = NSScreen.main ?? NSScreen.screens.first!
-        let visible = screen.visibleFrame
-        let primaryHeight = (NSScreen.screens.first ?? screen).frame.height
-        let axTop = primaryHeight - visible.maxY
+            indices.sort { windows[$0].zIndex < windows[$1].zIndex }
 
-        let padding: CGFloat = 20
-        let shape = WindowTiler.gridShape(for: indices.count)
-        let rowCount = shape.count
-        let rowH = visible.height / CGFloat(rowCount)
+            let screen = dIdx < screens.count ? screens[dIdx] : screens.first!
+            let visible = screen.visibleFrame
+            let axTop = primaryHeight - visible.maxY
 
-        var slotIdx = 0
-        for (row, cols) in shape.enumerated() {
-            let colW = visible.width / CGFloat(cols)
-            let axY = axTop + CGFloat(row) * rowH
-            for col in 0..<cols {
-                guard slotIdx < indices.count else { break }
-                let idx = indices[slotIdx]
-                let orig = windows[idx].originalFrame
+            let padding: CGFloat = 20
+            let shape = WindowTiler.gridShape(for: indices.count)
+            let rowCount = shape.count
+            let rowH = visible.height / CGFloat(rowCount)
 
-                // Cell with padding
-                let cellX = visible.origin.x + CGFloat(col) * colW + padding
-                let cellY = axY + padding
-                let cellW = colW - padding * 2
-                let cellH = rowH - padding * 2
+            var slotIdx = 0
+            for (row, cols) in shape.enumerated() {
+                let colW = visible.width / CGFloat(cols)
+                let axY = axTop + CGFloat(row) * rowH
+                for col in 0..<cols {
+                    guard slotIdx < indices.count else { break }
+                    let idx = indices[slotIdx]
+                    let orig = windows[idx].originalFrame
 
-                // Scale to fit cell preserving aspect ratio
-                let aspect = orig.width / max(orig.height, 1)
-                var fitW = cellW
-                var fitH = fitW / aspect
-                if fitH > cellH {
-                    fitH = cellH
-                    fitW = fitH * aspect
+                    let cellX = visible.origin.x + CGFloat(col) * colW + padding
+                    let cellY = axY + padding
+                    let cellW = colW - padding * 2
+                    let cellH = rowH - padding * 2
+
+                    let aspect = orig.width / max(orig.height, 1)
+                    var fitW = cellW
+                    var fitH = fitW / aspect
+                    if fitH > cellH {
+                        fitH = cellH
+                        fitW = fitH * aspect
+                    }
+
+                    let x = cellX + (cellW - fitW) / 2
+                    let y = cellY + (cellH - fitH) / 2
+
+                    windows[idx].editedFrame = CGRect(x: x, y: y, width: fitW, height: fitH)
+                    slotIdx += 1
+                }
+            }
+            totalExposed += indices.count
+        }
+        return totalExposed
+    }
+
+    /// Push overlapping windows apart with minimal movement. Operates per display.
+    /// Unlike expose (which rearranges into a grid), this preserves approximate positions
+    /// and only separates overlapping pairs along the shortest axis.
+    func smartSpreadLayer() -> Int {
+        guard let layer = activeLayer else { return 0 }
+
+        let screens = NSScreen.screens
+        let primaryHeight = screens.first?.frame.height ?? 0
+        var totalAffected = 0
+
+        let displayIndices = Set(windows.filter { $0.layer == layer }.map(\.displayIndex))
+        for dIdx in displayIndices {
+            let indices = windows.indices.filter { windows[$0].layer == layer && windows[$0].displayIndex == dIdx }
+            guard indices.count >= 2 else { continue }
+
+            let screen = dIdx < screens.count ? screens[dIdx] : screens.first!
+            let axTop = primaryHeight - screen.frame.maxY
+            let screenRect = CGRect(x: screen.frame.origin.x, y: axTop,
+                                    width: screen.frame.width, height: screen.frame.height)
+            var affected: Set<Int> = []
+
+            for _ in 0..<15 {
+                var hadOverlap = false
+
+                for i in 0..<indices.count {
+                    for j in (i + 1)..<indices.count {
+                        let idxA = indices[i]
+                        let idxB = indices[j]
+                        let a = windows[idxA].editedFrame
+                        let b = windows[idxB].editedFrame
+
+                        guard a.intersects(b) else { continue }
+                        hadOverlap = true
+
+                        let overlapW = min(a.maxX, b.maxX) - max(a.minX, b.minX)
+                        let overlapH = min(a.maxY, b.maxY) - max(a.minY, b.minY)
+
+                        if overlapW < overlapH {
+                            let push = (overlapW / 2).rounded(.up) + 1
+                            if a.midX <= b.midX {
+                                windows[idxA].editedFrame.origin.x -= push
+                                windows[idxB].editedFrame.origin.x += push
+                            } else {
+                                windows[idxA].editedFrame.origin.x += push
+                                windows[idxB].editedFrame.origin.x -= push
+                            }
+                        } else {
+                            let push = (overlapH / 2).rounded(.up) + 1
+                            if a.midY <= b.midY {
+                                windows[idxA].editedFrame.origin.y -= push
+                                windows[idxB].editedFrame.origin.y += push
+                            } else {
+                                windows[idxA].editedFrame.origin.y += push
+                                windows[idxB].editedFrame.origin.y -= push
+                            }
+                        }
+
+                        affected.insert(idxA)
+                        affected.insert(idxB)
+                    }
                 }
 
-                // Center in cell
-                let x = cellX + (cellW - fitW) / 2
-                let y = cellY + (cellH - fitH) / 2
+                for idx in indices {
+                    clampToScreen(at: idx, bounds: screenRect)
+                }
 
-                windows[idx].editedFrame = CGRect(x: x, y: y, width: fitW, height: fitH)
-                slotIdx += 1
+                if !hadOverlap { break }
             }
+            totalAffected += affected.count
         }
-        return indices.count
+
+        return totalAffected
+    }
+
+    /// Clamp a window's editedFrame to stay within screen bounds
+    private func clampToScreen(at idx: Int, bounds: CGRect) {
+        var f = windows[idx].editedFrame
+        if f.minX < bounds.minX { f.origin.x = bounds.minX }
+        if f.minY < bounds.minY { f.origin.y = bounds.minY }
+        if f.maxX > bounds.maxX { f.origin.x = bounds.maxX - f.width }
+        if f.maxY > bounds.maxY { f.origin.y = bounds.maxY - f.height }
+        windows[idx].editedFrame = f
     }
 
     /// Reset all edited frames back to original
@@ -389,13 +530,8 @@ final class ScreenMapEditorState: ObservableObject {
 
         renumberLayersContiguous()
 
-        // Clamp selectedLayers if any went out of range
-        selectedLayers = selectedLayers.filter { $0 < layerCount }
-
-        // After consolidation, collapse multi-select to show all so user sees the result
-        if selectedLayers.count > 1 {
-            selectedLayers = []
-        }
+        // Land on layer 0 — consolidation pushes windows toward it
+        selectedLayers = [0]
 
         return (old: oldCount, new: layerCount)
     }
@@ -425,6 +561,229 @@ final class ScreenMapEditorState: ObservableObject {
         selectedLayers = target < layerCount ? [target] : []
 
         return (count: moveCount, target: target)
+    }
+}
+
+// MARK: - Screen Map Action Log
+
+final class ScreenMapActionLog {
+    struct WindowSnapshot: Codable {
+        let wid: UInt32
+        let app: String
+        let title: String
+        let frame: FrameSnapshot
+        let layer: Int
+
+        struct FrameSnapshot: Codable {
+            let x: Int
+            let y: Int
+            let w: Int
+            let h: Int
+        }
+    }
+
+    struct MovedWindow: Codable {
+        let wid: UInt32
+        let app: String
+        let title: String
+        let fromFrame: WindowSnapshot.FrameSnapshot
+        let toFrame: WindowSnapshot.FrameSnapshot
+        let fromLayer: Int
+        let toLayer: Int
+    }
+
+    struct Entry: Codable {
+        let ref: String
+        let action: String
+        let timestamp: String
+        let summary: String
+        let before: [WindowSnapshot]   // pre-action state (from screen on first action)
+        let after: [WindowSnapshot]    // post-action planned state (calculated)
+        let moved: [MovedWindow]       // diff: what changed
+        // verify entries reuse this struct: before=intended, after=actual, moved=drifted
+    }
+
+    private(set) var lastEntry: Entry? = nil
+
+    private static var logFileURL: URL = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".devmux", isDirectory: true)
+            .appendingPathComponent("logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("actions.jsonl")
+    }()
+
+    private static func shortUUID() -> String {
+        let uuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        return String(uuid.suffix(8))
+    }
+
+    func snapshot(_ windows: [ScreenMapWindow]) -> [WindowSnapshot] {
+        windows.map { win in
+            WindowSnapshot(
+                wid: win.id,
+                app: win.app,
+                title: win.title,
+                frame: .init(
+                    x: Int(win.editedFrame.origin.x),
+                    y: Int(win.editedFrame.origin.y),
+                    w: Int(win.editedFrame.width),
+                    h: Int(win.editedFrame.height)
+                ),
+                layer: win.layer
+            )
+        }
+    }
+
+    func record(action: String, summary: String,
+                before: [WindowSnapshot], after: [WindowSnapshot]) -> Entry {
+        let ref = Self.shortUUID()
+
+        // Build moved array by diffing before/after
+        var afterByWid: [UInt32: WindowSnapshot] = [:]
+        for snap in after { afterByWid[snap.wid] = snap }
+
+        var moved: [MovedWindow] = []
+        for b in before {
+            guard let a = afterByWid[b.wid] else { continue }
+            let frameChanged = b.frame.x != a.frame.x || b.frame.y != a.frame.y
+                || b.frame.w != a.frame.w || b.frame.h != a.frame.h
+            let layerChanged = b.layer != a.layer
+            if frameChanged || layerChanged {
+                moved.append(MovedWindow(
+                    wid: b.wid, app: b.app, title: b.title,
+                    fromFrame: b.frame, toFrame: a.frame,
+                    fromLayer: b.layer, toLayer: a.layer
+                ))
+            }
+        }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let entry = Entry(
+            ref: ref, action: action,
+            timestamp: iso.string(from: Date()),
+            summary: summary,
+            before: before, after: after, moved: moved
+        )
+
+        // Write compact JSON line to ~/.devmux/logs/actions.jsonl
+        let compactEncoder = JSONEncoder()
+        compactEncoder.outputFormatting = [.sortedKeys]
+        if let data = try? compactEncoder.encode(entry),
+           var line = String(data: data, encoding: .utf8) {
+            line += "\n"
+            if let lineData = line.data(using: .utf8) {
+                if FileManager.default.fileExists(atPath: Self.logFileURL.path) {
+                    if let fh = try? FileHandle(forWritingTo: Self.logFileURL) {
+                        fh.seekToEndOfFile()
+                        fh.write(lineData)
+                        fh.closeFile()
+                    }
+                } else {
+                    try? lineData.write(to: Self.logFileURL)
+                }
+            }
+        }
+
+        DiagnosticLog.shared.info("[ScreenMapAction] \(ref) \(action): \(summary) (\(moved.count) moved)")
+
+        lastEntry = entry
+        return entry
+    }
+
+    /// Get the last entry as pretty-printed JSON string
+    func lastEntryJSON() -> String? {
+        guard let entry = lastEntry else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(entry) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Scan real window positions via CGWindowList and log a "verify" entry
+    /// comparing intended positions (from lastEntry) against actual positions.
+    func verify() {
+        guard let last = lastEntry else { return }
+        let intendedByWid: [UInt32: WindowSnapshot] = Dictionary(
+            last.after.map { ($0.wid, $0) }, uniquingKeysWith: { _, b in b }
+        )
+        guard !intendedByWid.isEmpty else { return }
+
+        // CGWindowList scan
+        guard let rawList = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return }
+
+        var actual: [WindowSnapshot] = []
+        var drifted: [MovedWindow] = []
+
+        for info in rawList {
+            guard let wid = info[kCGWindowNumber as String] as? UInt32,
+                  let intended = intendedByWid[wid],
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let cgX = bounds["X"] as? CGFloat,
+                  let cgY = bounds["Y"] as? CGFloat,
+                  let cgW = bounds["Width"] as? CGFloat,
+                  let cgH = bounds["Height"] as? CGFloat else { continue }
+
+            let snap = WindowSnapshot(
+                wid: wid, app: intended.app, title: intended.title,
+                frame: .init(x: Int(cgX), y: Int(cgY), w: Int(cgW), h: Int(cgH)),
+                layer: intended.layer
+            )
+            actual.append(snap)
+
+            // Check if actual differs from intended
+            let i = intended.frame
+            let a = snap.frame
+            if i.x != a.x || i.y != a.y || i.w != a.w || i.h != a.h {
+                drifted.append(MovedWindow(
+                    wid: wid, app: intended.app, title: intended.title,
+                    fromFrame: intended.frame, toFrame: a,
+                    fromLayer: intended.layer, toLayer: intended.layer
+                ))
+            }
+        }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let summary = drifted.isEmpty
+            ? "Verified \(actual.count) windows — all match"
+            : "Verified \(actual.count) windows — \(drifted.count) drifted"
+
+        let entry = Entry(
+            ref: last.ref,
+            action: "verify",
+            timestamp: iso.string(from: Date()),
+            summary: summary,
+            before: last.after,  // intended positions
+            after: actual,       // actual positions
+            moved: drifted       // windows that didn't land where intended
+        )
+
+        // Write to log file
+        let compactEncoder = JSONEncoder()
+        compactEncoder.outputFormatting = [.sortedKeys]
+        if let data = try? compactEncoder.encode(entry),
+           var line = String(data: data, encoding: .utf8) {
+            line += "\n"
+            if let lineData = line.data(using: .utf8) {
+                if FileManager.default.fileExists(atPath: Self.logFileURL.path) {
+                    if let fh = try? FileHandle(forWritingTo: Self.logFileURL) {
+                        fh.seekToEndOfFile()
+                        fh.write(lineData)
+                        fh.closeFile()
+                    }
+                } else {
+                    try? lineData.write(to: Self.logFileURL)
+                }
+            }
+        }
+
+        DiagnosticLog.shared.info("[ScreenMapAction] verify \(last.ref): \(summary)")
     }
 }
 
@@ -1084,22 +1443,24 @@ final class CommandModeState: ObservableObject {
             return true
 
         case 17: // t → auto-tile active layer
-            if let editor = screenMapEditor {
-                let count = editor.autoTileLayer()
-                if count >= 2 {
-                    flash("Tiled \(count) windows")
-                } else if count == 1 {
-                    flash("Only 1 window in layer")
-                } else {
-                    flash("Select a single layer first")
-                }
-                objectWillChange.send()
-            }
+            diag.info("[ScreenMap] t: tile layer")
+            tileScreenMapLayer()
             return true
 
         case 14: // e → expose (spread windows with gaps)
             diag.info("[ScreenMap] e: expose layer")
             exposeScreenMapLayer()
+            return true
+
+        case 2: // d → smart spread (push overlaps apart)
+            diag.info("[ScreenMap] d: smart spread")
+            smartSpreadScreenMapLayer()
+            return true
+
+        case 29: // 0 → fit all (reset zoom + pan)
+            diag.info("[ScreenMap] 0: fit all")
+            screenMapEditor?.resetZoomPan()
+            flash("Fit all")
             return true
 
         default:
@@ -1115,7 +1476,39 @@ final class CommandModeState: ObservableObject {
 
         struct CGWin {
             let wid: UInt32; let pid: Int32; let app: String; let title: String
-            let frame: CGRect; let layer: Int
+            let frame: CGRect; let layer: Int; let displayIndex: Int
+        }
+
+        // Build display rects for assigning windows to monitors
+        let screens = NSScreen.screens
+        let primaryHeight = screens.first?.frame.height ?? 0
+
+        /// Determine which display a window center belongs to (in CG/AX coordinates)
+        func displayIndex(for frame: CGRect) -> Int {
+            let centerX = frame.midX
+            let centerY = frame.midY
+            for (i, screen) in screens.enumerated() {
+                // Convert NSScreen frame (bottom-left origin) to CG coords (top-left origin)
+                let cgOriginY = primaryHeight - screen.frame.maxY
+                let cgRect = CGRect(x: screen.frame.origin.x, y: cgOriginY,
+                                    width: screen.frame.width, height: screen.frame.height)
+                if cgRect.contains(CGPoint(x: centerX, y: centerY)) {
+                    return i
+                }
+            }
+            // Fallback: closest screen by center distance
+            var bestIdx = 0
+            var bestDist = CGFloat.infinity
+            for (i, screen) in screens.enumerated() {
+                let cgOriginY = primaryHeight - screen.frame.maxY
+                let cgRect = CGRect(x: screen.frame.origin.x, y: cgOriginY,
+                                    width: screen.frame.width, height: screen.frame.height)
+                let dx = centerX - cgRect.midX
+                let dy = centerY - cgRect.midY
+                let dist = dx * dx + dy * dy
+                if dist < bestDist { bestDist = dist; bestIdx = i }
+            }
+            return bestIdx
         }
 
         var ordered: [CGWin] = []
@@ -1131,14 +1524,13 @@ final class CommandModeState: ObservableObject {
             if app == "DevmuxApp" || app == "devmux" { continue }
             let pid = info[kCGWindowOwnerPID as String] as? Int32 ?? 0
             let title = info[kCGWindowName as String] as? String ?? ""
-            ordered.append(CGWin(wid: wid, pid: pid, app: app, title: title, frame: rect, layer: layer))
+            let dIdx = displayIndex(for: rect)
+            ordered.append(CGWin(wid: wid, pid: pid, app: app, title: title, frame: rect, layer: layer, displayIndex: dIdx))
         }
 
         NSLog("[ScreenMap] enterScreenMapEditor: %d windows after filtering", ordered.count)
 
-        // Iterative peeling: significantly overlapped windows go to deeper layers.
-        // "Significant" = intersection area ≥ 15% of the smaller window's area.
-        // Windows in `ordered` are z-ordered (0 = frontmost).
+        // Iterative peeling PER DISPLAY: windows only occlude each other within the same monitor.
         func significantOverlap(_ a: CGRect, _ b: CGRect) -> Bool {
             let inter = a.intersection(b)
             guard !inter.isNull && inter.width > 0 && inter.height > 0 else { return false }
@@ -1148,31 +1540,39 @@ final class CommandModeState: ObservableObject {
             return interArea / smallerArea >= 0.15
         }
 
-        var remaining = Set(ordered.indices)
+        // Group indices by display
+        var byDisplay: [Int: [Int]] = [:]
+        for i in ordered.indices {
+            byDisplay[ordered[i].displayIndex, default: []].append(i)
+        }
+
         var layerAssignment = [Int: Int]()  // index → layer
-        var layer = 0
-        while !remaining.isEmpty {
-            var unoccluded: [Int] = []
-            for i in remaining {
-                let frame = ordered[i].frame
-                let isOccluded = remaining.contains(where: { j in
-                    j < i && significantOverlap(ordered[j].frame, frame)
-                })
-                if !isOccluded {
-                    unoccluded.append(i)
+
+        for (_, displayIndices) in byDisplay {
+            var remaining = Set(displayIndices)
+            var layer = 0
+            while !remaining.isEmpty {
+                var unoccluded: [Int] = []
+                for i in remaining {
+                    let frame = ordered[i].frame
+                    let isOccluded = remaining.contains(where: { j in
+                        j < i && significantOverlap(ordered[j].frame, frame)
+                    })
+                    if !isOccluded {
+                        unoccluded.append(i)
+                    }
                 }
+                if unoccluded.isEmpty {
+                    for i in remaining { layerAssignment[i] = layer }
+                    remaining.removeAll()
+                    break
+                }
+                for i in unoccluded {
+                    layerAssignment[i] = layer
+                    remaining.remove(i)
+                }
+                layer += 1
             }
-            // Safety valve: mutual overlap — assign all remaining to current layer
-            if unoccluded.isEmpty {
-                for i in remaining { layerAssignment[i] = layer }
-                remaining.removeAll()
-                break
-            }
-            for i in unoccluded {
-                layerAssignment[i] = layer
-                remaining.remove(i)
-            }
-            layer += 1
         }
 
         var mapWindows: [ScreenMapWindow] = []
@@ -1181,19 +1581,30 @@ final class CommandModeState: ObservableObject {
             mapWindows.append(ScreenMapWindow(
                 id: win.wid, pid: win.pid, app: win.app, title: win.title,
                 originalFrame: win.frame, editedFrame: win.frame,
-                zIndex: i, layer: assignedLayer
+                zIndex: i, layer: assignedLayer, displayIndex: win.displayIndex
             ))
         }
 
         let totalLayers = (mapWindows.map(\.layer).max() ?? 0) + 1
-        NSLog("[ScreenMap] Peeling complete: %d layers from %d windows", totalLayers, mapWindows.count)
+        NSLog("[ScreenMap] Peeling complete: %d layers from %d windows across %d displays", totalLayers, mapWindows.count, byDisplay.count)
         for l in 0..<totalLayers {
             let count = mapWindows.filter { $0.layer == l }.count
-            let names = mapWindows.filter { $0.layer == l }.map { $0.app }.joined(separator: ", ")
+            let names = mapWindows.filter { $0.layer == l }.map { "\($0.app)[\($0.displayIndex)]" }.joined(separator: ", ")
             NSLog("[ScreenMap]   Layer %d: %d windows [%@]", l, count, names)
         }
 
-        screenMapEditor = ScreenMapEditorState(windows: mapWindows)
+        // Build display geometries in CG coordinates
+        var displayGeometries: [DisplayGeometry] = []
+        for (i, screen) in screens.enumerated() {
+            let cgOriginY = primaryHeight - screen.frame.maxY
+            let cgRect = CGRect(x: screen.frame.origin.x, y: cgOriginY,
+                                width: screen.frame.width, height: screen.frame.height)
+            displayGeometries.append(DisplayGeometry(
+                index: i, cgRect: cgRect, label: "Display \(i)"
+            ))
+        }
+
+        screenMapEditor = ScreenMapEditorState(windows: mapWindows, displays: displayGeometries)
         desktopMode = .screenMap
     }
 
@@ -1224,14 +1635,25 @@ final class CommandModeState: ObservableObject {
         for m in allMoves {
             NSLog("[ScreenMap]   wid=%u → %.0f,%.0f %.0fx%.0f", m.wid, m.frame.origin.x, m.frame.origin.y, m.frame.width, m.frame.height)
         }
+        // Keep a reference to the action log before clearing the editor
+        let actionLog = editor.actionLog
+
+        // First pass: move all windows
         WindowTiler.batchMoveWindows(allMoves)
+
+        // Second pass after a tick: re-apply to override apps that snap back
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            WindowTiler.batchMoveWindows(allMoves)
+        }
 
         let noun = pendingEdits.count == 1 ? "edit" : "edits"
         flash("Applied \(pendingEdits.count) \(noun)")
         screenMapEditor = nil
         desktopMode = .browsing
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            // Verify actual window positions against intended
+            actionLog.verify()
             self?.desktopSnapshot = self?.buildDesktopInventory()
         }
     }
@@ -1239,11 +1661,18 @@ final class CommandModeState: ObservableObject {
     /// Flatten selected layers into the lowest one
     func flattenScreenMapLayers() {
         guard let editor = screenMapEditor else { return }
-        if let result = editor.flattenSelectedLayers() {
-            flash("Merged \(result.count) windows into L\(result.target)")
+        let before = editor.actionLog.snapshot(editor.windows)
+        let result = editor.flattenSelectedLayers()
+        let after = editor.actionLog.snapshot(editor.windows)
+        let summary: String
+        if let result = result {
+            summary = "Merged \(result.count) windows into L\(result.target)"
         } else {
-            flash("Select 2+ layers to flatten")
+            summary = "Select 2+ layers to flatten"
         }
+        let entry = editor.actionLog.record(action: "flatten", summary: summary, before: before, after: after)
+        editor.lastActionRef = entry.ref
+        flash("\(summary)  [\(entry.ref)]")
         objectWillChange.send()
     }
 
@@ -1347,25 +1776,89 @@ final class CommandModeState: ObservableObject {
     /// Consolidate screen map layers (defrag) and show flash
     func exposeScreenMapLayer() {
         guard let editor = screenMapEditor else { return }
+        let before = editor.actionLog.snapshot(editor.windows)
         let count = editor.exposeLayer()
+        let after = editor.actionLog.snapshot(editor.windows)
+        let summary: String
         if count >= 2 {
-            flash("Exposed \(count) windows")
+            summary = "Exposed \(count) windows"
         } else if count == 1 {
-            flash("Only 1 window in layer")
+            summary = "Only 1 window in layer"
         } else {
-            flash("Select a single layer first")
+            summary = "Select a single layer first"
         }
+        let entry = editor.actionLog.record(action: "expose", summary: summary, before: before, after: after)
+        editor.lastActionRef = entry.ref
+        flash("\(summary)  [\(entry.ref)]")
+        objectWillChange.send()
+    }
+
+    /// Public entry points for action bar buttons
+    func applyScreenMapEditsFromButton() {
+        if screenMapEditor?.isPreviewing == true { endScreenMapPreview() }
+        applyScreenMapEdits()
+    }
+
+    func exitScreenMap() {
+        if screenMapEditor?.isPreviewing == true { endScreenMapPreview() }
+        if let editor = screenMapEditor, editor.pendingEditCount > 0 {
+            editor.discardEdits()
+            flash("Edits discarded")
+        } else {
+            screenMapEditor = nil
+            desktopMode = .browsing
+        }
+    }
+
+    func smartSpreadScreenMapLayer() {
+        guard let editor = screenMapEditor else { return }
+        let before = editor.actionLog.snapshot(editor.windows)
+        let count = editor.smartSpreadLayer()
+        let after = editor.actionLog.snapshot(editor.windows)
+        let summary: String
+        if count >= 2 {
+            summary = "Spread \(count) windows"
+        } else if count == 1 {
+            summary = "Only 1 window in layer"
+        } else {
+            summary = "Select a single layer first"
+        }
+        let entry = editor.actionLog.record(action: "spread", summary: summary, before: before, after: after)
+        editor.lastActionRef = entry.ref
+        flash("\(summary)  [\(entry.ref)]")
+        objectWillChange.send()
+    }
+
+    func tileScreenMapLayer() {
+        guard let editor = screenMapEditor else { return }
+        let before = editor.actionLog.snapshot(editor.windows)
+        let count = editor.autoTileLayer()
+        let after = editor.actionLog.snapshot(editor.windows)
+        let summary: String
+        if count >= 2 {
+            summary = "Tiled \(count) windows"
+        } else if count == 1 {
+            summary = "Only 1 window in layer"
+        } else {
+            summary = "Select a single layer first"
+        }
+        let entry = editor.actionLog.record(action: "tile", summary: summary, before: before, after: after)
+        editor.lastActionRef = entry.ref
+        flash("\(summary)  [\(entry.ref)]")
         objectWillChange.send()
     }
 
     func consolidateScreenMapLayers() {
         guard let editor = screenMapEditor else { return }
+        let before = editor.actionLog.snapshot(editor.windows)
         let result = editor.consolidateLayers()
-        if result.old == result.new {
-            flash("Already optimal")
-        } else {
-            flash("Consolidated \(result.old) → \(result.new) layers")
-        }
+        let after = editor.actionLog.snapshot(editor.windows)
+        let summary = result.old == result.new
+            ? "Already optimal"
+            : "Consolidated \(result.old) → \(result.new) layers"
+        let entry = editor.actionLog.record(action: "merge", summary: summary, before: before, after: after)
+        editor.lastActionRef = entry.ref
+        flash("\(summary)  [\(entry.ref)]")
         objectWillChange.send()
     }
 
@@ -1639,7 +2132,7 @@ final class CommandModeState: ObservableObject {
     }
 
     /// Show a brief flash message that auto-dismisses
-    private func flash(_ message: String) {
+    func flash(_ message: String) {
         flashMessage = message
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             if self?.flashMessage == message { self?.flashMessage = nil }
