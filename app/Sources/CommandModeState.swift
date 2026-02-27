@@ -273,10 +273,17 @@ final class ScreenMapEditorState: ObservableObject {
         let screens = NSScreen.screens
         let primaryHeight = screens.first?.frame.height ?? 0
         var totalTiled = 0
+        let diag = DiagnosticLog.shared
+
+        diag.info("[Tile] autoTileLayer layer=\(layer) screens=\(screens.count) primaryH=\(Int(primaryHeight))")
+        for (i, screen) in screens.enumerated() {
+            let cgY = primaryHeight - screen.frame.maxY
+            diag.info("[Tile] NSScreen[\(i)] frame=\(Int(screen.frame.origin.x)),\(Int(screen.frame.origin.y)) \(Int(screen.frame.width))×\(Int(screen.frame.height)) cgY=\(Int(cgY)) visible=\(Int(screen.visibleFrame.origin.x)),\(Int(screen.visibleFrame.origin.y)) \(Int(screen.visibleFrame.width))×\(Int(screen.visibleFrame.height))")
+        }
 
         // Tile per display: each monitor tiles its own windows independently
         let displayIndices = Set(windows.filter { $0.layer == layer }.map(\.displayIndex))
-        for dIdx in displayIndices {
+        for dIdx in displayIndices.sorted() {
             var indices = windows.indices.filter { windows[$0].layer == layer && windows[$0].displayIndex == dIdx }
             guard indices.count >= 1 else { continue }
 
@@ -286,12 +293,12 @@ final class ScreenMapEditorState: ObservableObject {
             let visible = screen.visibleFrame
             let axTop = primaryHeight - visible.maxY
 
+            diag.info("[Tile] display=\(dIdx) \(indices.count) windows, visible=\(Int(visible.origin.x)),\(Int(visible.origin.y)) \(Int(visible.width))×\(Int(visible.height)) axTop=\(Int(axTop))")
+
             if indices.count == 1 {
-                // Single window: maximize to display
-                windows[indices[0]].editedFrame = CGRect(
-                    x: visible.origin.x, y: axTop,
-                    width: visible.width, height: visible.height
-                )
+                let frame = CGRect(x: visible.origin.x, y: axTop, width: visible.width, height: visible.height)
+                windows[indices[0]].editedFrame = frame
+                diag.info("[Tile]   \(windows[indices[0]].app) → \(Int(frame.origin.x)),\(Int(frame.origin.y)) \(Int(frame.width))×\(Int(frame.height))")
                 totalTiled += 1
                 continue
             }
@@ -311,10 +318,9 @@ final class ScreenMapEditorState: ObservableObject {
                     guard slotIdx < indices.count else { break }
                     let x0 = baseX + (col * totalW) / cols
                     let x1 = baseX + ((col + 1) * totalW) / cols
-                    windows[indices[slotIdx]].editedFrame = CGRect(
-                        x: CGFloat(x0), y: CGFloat(y0),
-                        width: CGFloat(x1 - x0), height: CGFloat(y1 - y0)
-                    )
+                    let frame = CGRect(x: CGFloat(x0), y: CGFloat(y0), width: CGFloat(x1 - x0), height: CGFloat(y1 - y0))
+                    windows[indices[slotIdx]].editedFrame = frame
+                    diag.info("[Tile]   \(windows[indices[slotIdx]].app) → \(Int(frame.origin.x)),\(Int(frame.origin.y)) \(Int(frame.width))×\(Int(frame.height))")
                     slotIdx += 1
                 }
             }
@@ -1728,11 +1734,20 @@ final class CommandModeState: ObservableObject {
         // View layer will call showPreviewWindow() via onChange
     }
 
-    /// Called from the view layer to create the overlay window
+    /// Called from the view layer to create the overlay window spanning all screens
     func showPreviewWindow(contentView: NSView) {
-        let screen = NSScreen.main ?? NSScreen.screens[0]
+        // Compute union of all screen frames (AppKit coords, bottom-left origin)
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+        var unionFrame = screens[0].frame
+        for screen in screens.dropFirst() {
+            unionFrame = unionFrame.union(screen.frame)
+        }
+        let diag = DiagnosticLog.shared
+        diag.info("[Preview] union frame: \(Int(unionFrame.origin.x)),\(Int(unionFrame.origin.y)) \(Int(unionFrame.width))×\(Int(unionFrame.height))")
+
         let window = NSWindow(
-            contentRect: screen.frame,
+            contentRect: unionFrame,
             styleMask: .borderless,
             backing: .buffered,
             defer: false
@@ -1742,6 +1757,7 @@ final class CommandModeState: ObservableObject {
         window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)))
         window.hasShadow = false
         window.contentView = contentView
+        window.setFrame(unionFrame, display: true)
         window.orderFrontRegardless()
         previewWindow = window
 

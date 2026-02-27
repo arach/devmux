@@ -1166,20 +1166,36 @@ struct CommandModeView: View {
     /// Show the preview overlay when isPreviewing becomes true
     private func handlePreviewChange(isPreviewing: Bool) {
         guard isPreviewing, let editor = state.screenMapEditor else { return }
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let screenFrame = screen.frame
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? screenFrame.height
-        let screenCGOriginX = screenFrame.origin.x
-        let screenCGOriginY = primaryHeight - (screenFrame.origin.y + screenFrame.height)
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+
+        // Compute union of all screen frames (AppKit coords)
+        var unionFrame = screens[0].frame
+        for screen in screens.dropFirst() {
+            unionFrame = unionFrame.union(screen.frame)
+        }
+
+        // CG origin of the union rect (top-left origin)
+        let primaryHeight = screens.first?.frame.height ?? unionFrame.height
+        let unionCGOriginX = unionFrame.origin.x
+        let unionCGOriginY = primaryHeight - (unionFrame.origin.y + unionFrame.height)
+
         let visible = editor.visibleWindows
         let label = editor.layerLabel
         let captures = state.previewCaptures
 
+        let diag = DiagnosticLog.shared
+        diag.info("[Preview] unionFrame=\(Int(unionFrame.origin.x)),\(Int(unionFrame.origin.y)) \(Int(unionFrame.width))×\(Int(unionFrame.height))")
+        diag.info("[Preview] unionCGOrigin=\(Int(unionCGOriginX)),\(Int(unionCGOriginY))")
+        for win in visible {
+            diag.info("[Preview] win \(win.app) wid=\(win.id) display=\(win.displayIndex) edited=(\(Int(win.editedFrame.origin.x)),\(Int(win.editedFrame.origin.y)) \(Int(win.editedFrame.width))×\(Int(win.editedFrame.height)))")
+        }
+
         let overlay = LayerPreviewOverlay(
             windows: visible, layerLabel: label,
             captures: captures,
-            screenFrame: screenFrame,
-            screenCGOrigin: CGPoint(x: screenCGOriginX, y: screenCGOriginY)
+            screenFrame: unionFrame,
+            screenCGOrigin: CGPoint(x: unionCGOriginX, y: unionCGOriginY)
         )
         let hostingView = NSHostingView(rootView: overlay)
         state.showPreviewWindow(contentView: hostingView)
